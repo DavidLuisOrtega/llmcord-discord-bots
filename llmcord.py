@@ -1,12 +1,13 @@
 import asyncio
 from base64 import b64encode
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
 import os
 import random
 from time import monotonic
 from typing import Any, Literal, Optional
+from zoneinfo import ZoneInfo
 
 import discord
 from discord.app_commands import Choice
@@ -63,6 +64,7 @@ cooldown_lock = asyncio.Lock()
 redis_client = None
 redis_client_url = None
 redis_client_lock = asyncio.Lock()
+afk_scheduler_task = None
 
 
 def get_bot_identity() -> str:
@@ -87,6 +89,222 @@ async def get_redis_client(curr_config: dict[str, Any]):
             await redis_client.ping()
 
     return redis_client
+
+
+def now_ts() -> float:
+    return datetime.now(timezone.utc).timestamp()
+
+
+def parse_afk_followup_delays(curr_config: dict[str, Any]) -> list[float]:
+    first = max(float(curr_config.get("afk_first_followup_seconds", 600) or 0), 0)
+    second = max(float(curr_config.get("afk_second_followup_seconds", 3600) or 0), 0)
+    return [delay for delay in (first, second) if delay > 0]
+
+
+def message_looks_open_ended(content: str) -> bool:
+    normalized = " ".join(content.lower().split())
+    if not normalized:
+        return False
+    if "?" in normalized:
+        return True
+    prefixes = (
+        "anyone",
+        "any thoughts",
+        "what do you think",
+        "what should we",
+        "what's on",
+        "whats on",
+        "ideas",
+    )
+    return any(normalized.startswith(prefix) for prefix in prefixes)
+
+
+def in_quiet_hours(curr_config: dict[str, Any]) -> bool:
+    if not curr_config.get("quiet_hours_enabled", False):
+        return False
+
+    tz_name = str(curr_config.get("quiet_hours_timezone", "UTC") or "UTC")
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = timezone.utc
+
+    start_hour = int(curr_config.get("quiet_hours_start_hour", 23) or 23) % 24
+    end_hour = int(curr_config.get("quiet_hours_end_hour", 8) or 8) % 24
+    hour = datetime.now(timezone.utc).astimezone(tz).hour
+
+    if start_hour == end_hour:
+        return False
+    if start_hour < end_hour:
+        return start_hour <= hour < end_hour
+    return hour >= start_hour or hour < end_hour
+
+
+async def maybe_schedule_afk_followup(new_msg: discord.Message, curr_config: dict[str, Any], redis_client_instance) -> None:
+    if new_msg.channel.type == discord.ChannelType.private or new_msg.author.bot:
+        return
+    if not curr_config.get("afk_followup_enabled", False):
+        return
+    if redis_client_instance is None:
+        return
+    if curr_config.get("afk_open_question_only", True) and not message_looks_open_ended(new_msg.content):
+        return
+
+    delays = parse_afk_followup_delays(curr_config)
+    if delays == []:
+        return
+
+    max_followups = max(int(float(curr_config.get("afk_max_followups_per_message", 2) or 2)), 1)
+    max_followups = min(max_followups, len(delays))
+    if max_followups <= 0:
+        return
+
+    source_human_ts = now_ts()
+    channel_id = new_msg.channel.id
+    source_message_id = new_msg.id
+    item_id = f"{channel_id}:{source_message_id}"
+    seed_ttl_seconds = int(max(delays[:max_followups]) + 24 * 3600)
+    seed_key = f"llmcord:afk:seed:{item_id}"
+    schedule_zset_key = "llmcord:afk:schedule"
+    item_hash_key = f"llmcord:afk:item:{item_id}"
+    channel_last_human_ts_key = f"llmcord:afk:last_human_ts:{channel_id}"
+
+    await redis_client_instance.set(channel_last_human_ts_key, source_human_ts, ex=7 * 24 * 3600)
+    seeded = await redis_client_instance.set(seed_key, get_bot_identity(), ex=seed_ttl_seconds, nx=True)
+    if not seeded:
+        return
+
+    await redis_client_instance.hset(
+        item_hash_key,
+        mapping=dict(
+            channel_id=str(channel_id),
+            source_message_id=str(source_message_id),
+            source_human_ts=str(source_human_ts),
+            followups_sent="0",
+            next_followup_index="0",
+            max_followups=str(max_followups),
+            delays_csv=",".join(str(delay) for delay in delays),
+            created_by=get_bot_identity(),
+        ),
+    )
+    await redis_client_instance.expire(item_hash_key, seed_ttl_seconds)
+    await redis_client_instance.zadd(schedule_zset_key, {item_id: source_human_ts + delays[0]})
+
+
+async def process_afk_followup_item(item_id: str, curr_config: dict[str, Any], redis_client_instance) -> None:
+    item_hash_key = f"llmcord:afk:item:{item_id}"
+    claim_key = f"llmcord:afk:claim:{item_id}"
+    schedule_zset_key = "llmcord:afk:schedule"
+
+    claimed = await redis_client_instance.set(claim_key, get_bot_identity(), ex=45, nx=True)
+    if not claimed:
+        return
+
+    item = await redis_client_instance.hgetall(item_hash_key)
+    if item == {}:
+        await redis_client_instance.zrem(schedule_zset_key, item_id)
+        return
+
+    channel_id = int(item["channel_id"])
+    source_message_id = int(item["source_message_id"])
+    source_human_ts = float(item["source_human_ts"])
+    followups_sent = int(item.get("followups_sent", "0"))
+    next_followup_index = int(item.get("next_followup_index", "0"))
+    max_followups = int(item.get("max_followups", "1"))
+    delays = [float(part) for part in item.get("delays_csv", "").split(",") if part]
+    if delays == [] or next_followup_index >= len(delays) or followups_sent >= max_followups:
+        await redis_client_instance.zrem(schedule_zset_key, item_id)
+        await redis_client_instance.delete(item_hash_key)
+        return
+
+    if in_quiet_hours(curr_config):
+        await redis_client_instance.zadd(schedule_zset_key, {item_id: now_ts() + 300})
+        return
+
+    if curr_config.get("afk_cancel_on_any_human_message", True):
+        channel_last_human_ts_key = f"llmcord:afk:last_human_ts:{channel_id}"
+        latest_human_ts = float(await redis_client_instance.get(channel_last_human_ts_key) or 0)
+        if latest_human_ts > source_human_ts:
+            await redis_client_instance.zrem(schedule_zset_key, item_id)
+            await redis_client_instance.delete(item_hash_key)
+            return
+
+    afk_followup_chance = clamp_01(float(curr_config.get("afk_followup_chance", 0.5) or 0.5))
+    if random.random() > afk_followup_chance:
+        next_followup_index += 1
+        if next_followup_index >= min(max_followups, len(delays)):
+            await redis_client_instance.zrem(schedule_zset_key, item_id)
+            await redis_client_instance.delete(item_hash_key)
+        else:
+            await redis_client_instance.hset(item_hash_key, mapping=dict(next_followup_index=str(next_followup_index)))
+            await redis_client_instance.zadd(schedule_zset_key, {item_id: source_human_ts + delays[next_followup_index]})
+        return
+
+    channel = discord_bot.get_channel(channel_id)
+    if channel is None:
+        try:
+            channel = await discord_bot.fetch_channel(channel_id)
+        except (discord.NotFound, discord.HTTPException):
+            channel = None
+    if channel is None:
+        await redis_client_instance.zadd(schedule_zset_key, {item_id: now_ts() + 120})
+        return
+
+    try:
+        source_msg = await channel.fetch_message(source_message_id)
+    except (discord.NotFound, discord.HTTPException):
+        source_msg = None
+    if source_msg is None:
+        await redis_client_instance.zrem(schedule_zset_key, item_id)
+        await redis_client_instance.delete(item_hash_key)
+        return
+
+    followup_templates = curr_config.get("afk_followup_templates") or [
+        "no rush. drop your thoughts when you're back.",
+        "whenever you're free, curious what you think.",
+    ]
+    followup_text = random.choice(followup_templates)
+
+    try:
+        await source_msg.reply(followup_text, silent=True)
+    except (discord.NotFound, discord.HTTPException):
+        await redis_client_instance.zadd(schedule_zset_key, {item_id: now_ts() + 120})
+        return
+
+    followups_sent += 1
+    next_followup_index += 1
+    if followups_sent >= max_followups or next_followup_index >= len(delays):
+        await redis_client_instance.zrem(schedule_zset_key, item_id)
+        await redis_client_instance.delete(item_hash_key)
+    else:
+        await redis_client_instance.hset(
+            item_hash_key,
+            mapping=dict(followups_sent=str(followups_sent), next_followup_index=str(next_followup_index)),
+        )
+        await redis_client_instance.zadd(schedule_zset_key, {item_id: source_human_ts + delays[next_followup_index]})
+
+
+async def afk_followup_scheduler_loop() -> None:
+    while True:
+        try:
+            curr_config = await asyncio.to_thread(get_config)
+            poll_seconds = max(float(curr_config.get("afk_scheduler_poll_seconds", 5) or 5), 1)
+            redis_client_instance = await get_redis_client(curr_config)
+
+            if redis_client_instance is None or not curr_config.get("afk_followup_enabled", False):
+                await asyncio.sleep(poll_seconds)
+                continue
+
+            due_item_ids = await redis_client_instance.zrangebyscore("llmcord:afk:schedule", min=0, max=now_ts(), start=0, num=10)
+            for item_id in due_item_ids:
+                await process_afk_followup_item(item_id, curr_config, redis_client_instance)
+
+            await asyncio.sleep(poll_seconds + random.uniform(0, 0.5))
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logging.exception("Error in AFK follow-up scheduler")
+            await asyncio.sleep(3)
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -144,10 +362,15 @@ async def model_autocomplete(interaction: discord.Interaction, curr_str: str) ->
 
 @discord_bot.event
 async def on_ready() -> None:
+    global afk_scheduler_task
+
     if client_id := config.get("client_id"):
         logging.info(f"\n\nBOT INVITE URL:\nhttps://discord.com/oauth2/authorize?client_id={client_id}&permissions=412317191168&scope=bot\n")
 
     await discord_bot.tree.sync()
+
+    if afk_scheduler_task is None or afk_scheduler_task.done():
+        afk_scheduler_task = asyncio.create_task(afk_followup_scheduler_loop())
 
 
 @discord_bot.event
@@ -190,6 +413,7 @@ async def on_message(new_msg: discord.Message) -> None:
     channel_ids = set(filter(None, (new_msg.channel.id, getattr(new_msg.channel, "parent_id", None), getattr(new_msg.channel, "category_id", None))))
 
     is_direct_reply = await is_reply_to_this_bot() if not is_dm else False
+    should_process = True
 
     if not is_dm:
         autonomous_bot_only_mode = config.get("autonomous_bot_only_mode", False)
@@ -215,10 +439,6 @@ async def on_message(new_msg: discord.Message) -> None:
         else:
             should_process = has_direct_mention or is_direct_reply
 
-        if not should_process:
-            return
-
-
     allow_dms = config.get("allow_dms", True)
 
     permissions = config["permissions"]
@@ -239,6 +459,20 @@ async def on_message(new_msg: discord.Message) -> None:
 
     if is_bad_user or is_bad_channel:
         return
+
+    redis_client_instance = None
+    if not is_dm:
+        try:
+            redis_client_instance = await get_redis_client(config)
+        except RedisError:
+            logging.exception("Redis unavailable, continuing without distributed coordination")
+            redis_client_instance = None
+
+        if not new_msg.author.bot:
+            await maybe_schedule_afk_followup(new_msg, config, redis_client_instance)
+
+        if not should_process:
+            return
 
     reaction_delay_base_seconds = max(float(config.get("reaction_delay_base_seconds", 0) or 0), 0)
     reaction_delay_jitter_seconds = max(float(config.get("reaction_delay_jitter_seconds", 0) or 0), 0)
@@ -278,12 +512,6 @@ async def on_message(new_msg: discord.Message) -> None:
 
     redis_claim_state = None
     if not is_dm:
-        try:
-            redis_client_instance = await get_redis_client(config)
-        except RedisError:
-            logging.exception("Redis unavailable, continuing without distributed coordination")
-            redis_client_instance = None
-
         if redis_client_instance is not None:
             channel_id = new_msg.channel.id
             source_message_id = new_msg.id

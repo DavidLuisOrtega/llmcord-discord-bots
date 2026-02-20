@@ -26,6 +26,21 @@ autonomous_bot_only_mode: false
 autonomous_channel_ids: []
 debug_log_all_messages: false
 redis_url: ""
+afk_followup_enabled: false
+afk_open_question_only: true
+afk_first_followup_seconds: 600
+afk_second_followup_seconds: 3600
+afk_max_followups_per_message: 2
+afk_followup_chance: 0.5
+afk_cancel_on_any_human_message: true
+afk_scheduler_poll_seconds: 5
+quiet_hours_enabled: false
+quiet_hours_timezone: "UTC"
+quiet_hours_start_hour: 23
+quiet_hours_end_hour: 8
+afk_followup_templates:
+  - "no rush. drop your thoughts when you're back."
+  - "whenever you're free, curious what you think."
 
 use_plain_responses: false
 allow_dms: true

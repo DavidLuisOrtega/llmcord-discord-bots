@@ -99,6 +99,19 @@ Or run local models with:
 | **autonomous_bot_only_mode** | When `true`, in configured autonomous channels the bot can react to other bot-authored messages without requiring mentions/replies. It still ignores its own messages.<br /><br />Default: `false` |
 | **autonomous_channel_ids** | Channel/category IDs where autonomous mode is active. Leave empty to apply autonomous mode to all channels this bot can access.<br /><br />Default: `[]` |
 | **redis_url** | Optional Redis connection URL (`redis://...`). When set, enables distributed floor lock + active responder coordination across multiple bot containers.<br /><br />Default: `""` (disabled) |
+| **afk_followup_enabled** | Enables delayed follow-up nudges for open-ended human messages when the conversation goes quiet.<br /><br />Default: `false` |
+| **afk_open_question_only** | When `true`, only schedule AFK follow-ups for messages that look open-ended (question-like).<br /><br />Default: `true` |
+| **afk_first_followup_seconds** | Delay before first AFK follow-up after a human source message.<br /><br />Default: `600` |
+| **afk_second_followup_seconds** | Delay before second AFK follow-up after the same source message.<br /><br />Default: `3600` |
+| **afk_max_followups_per_message** | Maximum AFK follow-ups per source human message.<br /><br />Default: `2` |
+| **afk_followup_chance** | Probability (0-1) each AFK follow-up attempt actually sends (adds natural randomness).<br /><br />Default: `0.5` |
+| **afk_cancel_on_any_human_message** | Cancel pending AFK follow-ups if any newer human message arrives in that channel.<br /><br />Default: `true` |
+| **afk_scheduler_poll_seconds** | How often each bot checks Redis for due AFK follow-up jobs.<br /><br />Default: `5` |
+| **quiet_hours_enabled** | Suppresses AFK follow-up sending during quiet hours (jobs are deferred, not dropped).<br /><br />Default: `false` |
+| **quiet_hours_timezone** | IANA timezone for quiet-hour checks (example: `America/New_York`).<br /><br />Default: `UTC` |
+| **quiet_hours_start_hour** | Quiet-hours start hour (0-23, local to `quiet_hours_timezone`).<br /><br />Default: `23` |
+| **quiet_hours_end_hour** | Quiet-hours end hour (0-23, local to `quiet_hours_timezone`).<br /><br />Default: `8` |
+| **afk_followup_templates** | Candidate short follow-up lines used when AFK reminders trigger.<br /><br />Default: two generic templates |
 | **use_plain_responses** | When set to `true` the bot will use plaintext responses instead of embeds. Plaintext responses have a shorter character limit so the bot's messages may split more often.<br /><br />Default: `false`<br /><br />**Also disables streamed responses and warning messages.** |
 | **allow_dms** | Set to `false` to disable direct message access.<br /><br />Default: `true` |
 | **permissions** | Configure access permissions for `users`, `roles` and `channels`, each with a list of `allowed_ids` and `blocked_ids`.<br /><br />Control which `users` are admins with `admin_ids`. Admins can change the model with `/model` and DM the bot even if `allow_dms` is `false`.<br /><br />**Leave `allowed_ids` empty to allow ALL in that category.**<br /><br />**Role and channel permissions do not affect DMs.**<br /><br />**You can use [category](https://support.discord.com/hc/en-us/articles/115001580171-Channel-Categories-101) IDs to control channel permissions in groups.** |
