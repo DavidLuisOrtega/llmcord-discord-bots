@@ -14,6 +14,8 @@ from discord.ext import commands
 from discord.ui import LayoutView, TextDisplay
 import httpx
 from openai import AsyncOpenAI
+import redis.asyncio as redis
+from redis.exceptions import RedisError
 import yaml
 
 logging.basicConfig(
@@ -58,6 +60,33 @@ msg_nodes = {}
 last_task_time = 0
 next_response_time_by_channel = {}
 cooldown_lock = asyncio.Lock()
+redis_client = None
+redis_client_url = None
+redis_client_lock = asyncio.Lock()
+
+
+def get_bot_identity() -> str:
+    if discord_bot.user is not None:
+        return str(discord_bot.user.id)
+    if config.get("client_id"):
+        return str(config["client_id"])
+    return "unknown-bot"
+
+
+async def get_redis_client(curr_config: dict[str, Any]):
+    global redis_client, redis_client_url
+
+    redis_url = str(curr_config.get("redis_url", "") or "").strip()
+    if not redis_url:
+        return None
+
+    async with redis_client_lock:
+        if redis_client is None or redis_client_url != redis_url:
+            redis_client = redis.from_url(redis_url, decode_responses=True)
+            redis_client_url = redis_url
+            await redis_client.ping()
+
+    return redis_client
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -160,6 +189,8 @@ async def on_message(new_msg: discord.Message) -> None:
     role_ids = set(role.id for role in getattr(new_msg.author, "roles", ()))
     channel_ids = set(filter(None, (new_msg.channel.id, getattr(new_msg.channel, "parent_id", None), getattr(new_msg.channel, "category_id", None))))
 
+    is_direct_reply = await is_reply_to_this_bot() if not is_dm else False
+
     if not is_dm:
         autonomous_bot_only_mode = config.get("autonomous_bot_only_mode", False)
         autonomous_channel_ids = set(config.get("autonomous_channel_ids", []))
@@ -167,7 +198,7 @@ async def on_message(new_msg: discord.Message) -> None:
 
         if in_autonomous_scope:
             # Explicit @mentions/replies should always trigger in autonomous channels.
-            if has_direct_mention or await is_reply_to_this_bot():
+            if has_direct_mention or is_direct_reply:
                 should_process = True
             else:
                 # Otherwise, use per-bot probabilistic participation to avoid dogpiles.
@@ -182,7 +213,7 @@ async def on_message(new_msg: discord.Message) -> None:
                 effective_chance = clamp_01(effective_chance * response_priority_weight)
                 should_process = random.random() < effective_chance
         else:
-            should_process = has_direct_mention or await is_reply_to_this_bot()
+            should_process = has_direct_mention or is_direct_reply
 
         if not should_process:
             return
@@ -208,6 +239,11 @@ async def on_message(new_msg: discord.Message) -> None:
 
     if is_bad_user or is_bad_channel:
         return
+
+    reaction_delay_base_seconds = max(float(config.get("reaction_delay_base_seconds", 0) or 0), 0)
+    reaction_delay_jitter_seconds = max(float(config.get("reaction_delay_jitter_seconds", 0) or 0), 0)
+    if not is_dm and (reaction_delay_base_seconds > 0 or reaction_delay_jitter_seconds > 0):
+        await asyncio.sleep(reaction_delay_base_seconds + random.uniform(0, reaction_delay_jitter_seconds))
 
     global_channel_cooldown_seconds = max(float(config.get("global_channel_cooldown_seconds", 0) or 0), 0)
     global_channel_arbitration_jitter_seconds = max(float(config.get("global_channel_arbitration_jitter_seconds", 0) or 0), 0)
@@ -239,6 +275,58 @@ async def on_message(new_msg: discord.Message) -> None:
             if curr_time < next_response_time_by_channel.get(channel_id, 0):
                 return
             next_response_time_by_channel[channel_id] = curr_time + response_cooldown_seconds + random.uniform(0, response_cooldown_jitter_seconds)
+
+    redis_claim_state = None
+    if not is_dm:
+        try:
+            redis_client_instance = await get_redis_client(config)
+        except RedisError:
+            logging.exception("Redis unavailable, continuing without distributed coordination")
+            redis_client_instance = None
+
+        if redis_client_instance is not None:
+            channel_id = new_msg.channel.id
+            source_message_id = new_msg.id
+            bot_identity = get_bot_identity()
+
+            floor_lock_ttl_seconds = max(int(float(config.get("floor_lock_ttl_seconds", 45) or 45)), 5)
+            active_responder_ttl_seconds = max(int(float(config.get("active_responder_ttl_seconds", 90) or 90)), 10)
+            source_message_window_seconds = max(int(float(config.get("source_message_window_seconds", 180) or 180)), 30)
+            max_responses_per_source_message = max(int(float(config.get("max_responses_per_source_message", 2) or 2)), 1)
+            followup_response_chance = clamp_01(float(config.get("followup_response_chance", 0.15) or 0.15))
+            is_directed_message = has_direct_mention or is_direct_reply
+
+            floor_lock_key = f"llmcord:floor:{channel_id}:{source_message_id}"
+            source_count_key = f"llmcord:source_count:{channel_id}:{source_message_id}"
+            active_responder_key = f"llmcord:active_responder:{channel_id}"
+
+            claimed_floor = await redis_client_instance.set(floor_lock_key, bot_identity, ex=floor_lock_ttl_seconds, nx=True)
+            if not claimed_floor:
+                return
+
+            response_index = await redis_client_instance.incr(source_count_key)
+            if response_index == 1:
+                await redis_client_instance.expire(source_count_key, source_message_window_seconds)
+
+            if response_index > max_responses_per_source_message:
+                await redis_client_instance.decr(source_count_key)
+                return
+
+            if response_index > 1 and not is_directed_message and random.random() >= followup_response_chance:
+                await redis_client_instance.decr(source_count_key)
+                return
+
+            claimed_active = await redis_client_instance.set(active_responder_key, bot_identity, ex=active_responder_ttl_seconds, nx=True)
+            if not claimed_active:
+                await redis_client_instance.decr(source_count_key)
+                return
+
+            redis_claim_state = dict(
+                client=redis_client_instance,
+                source_count_key=source_count_key,
+                active_responder_key=active_responder_key,
+                bot_identity=bot_identity,
+            )
 
     provider_slash_model = curr_model
     provider, model = provider_slash_model.removesuffix(":vision").split("/", 1)
@@ -437,6 +525,24 @@ async def on_message(new_msg: discord.Message) -> None:
 
     except Exception:
         logging.exception("Error while generating response")
+    finally:
+        if redis_claim_state is not None:
+            redis_client_instance = redis_claim_state["client"]
+            active_responder_key = redis_claim_state["active_responder_key"]
+            source_count_key = redis_claim_state["source_count_key"]
+            bot_identity = redis_claim_state["bot_identity"]
+            # Release the typing floor only if we still own it.
+            try:
+                if await redis_client_instance.get(active_responder_key) == bot_identity:
+                    await redis_client_instance.delete(active_responder_key)
+            except RedisError:
+                logging.exception("Failed to release Redis active responder key")
+            # If generation produced no messages, roll back this reserved response slot.
+            if response_msgs == []:
+                try:
+                    await redis_client_instance.decr(source_count_key)
+                except RedisError:
+                    logging.exception("Failed to roll back Redis source response count")
 
     for response_msg in response_msgs:
         msg_nodes[response_msg.id].text = "".join(response_contents)

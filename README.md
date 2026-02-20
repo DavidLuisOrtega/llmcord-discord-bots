@@ -86,11 +86,19 @@ Or run local models with:
 | **response_cooldown_jitter_seconds** | Adds random delay on top of `response_cooldown_seconds` (uniform range from `0` to this value) so bot turns are less synchronized.<br /><br />Default: `0` |
 | **global_channel_cooldown_seconds** | Shared channel-level cooldown based on recent bot messages in channel history. Helps prevent many bots posting back-to-back at once.<br /><br />Default: `0` (disabled) |
 | **global_channel_arbitration_jitter_seconds** | Small random wait before checking channel history to decide which bot wins a turn when several are triggered together.<br /><br />Default: `0` |
+| **reaction_delay_base_seconds** | Base post-probability reaction delay before this bot attempts to claim the floor. Use per persona to simulate different social latencies.<br /><br />Default: `0` |
+| **reaction_delay_jitter_seconds** | Random delay added to `reaction_delay_base_seconds` (uniform `0..N`) for natural staggered timing.<br /><br />Default: `0` |
 | **group_response_chance** | In autonomous mode, probability (0-1) this bot responds to a non-directed message (not explicitly @mentioned and not a direct reply).<br /><br />Default: `1.0` |
 | **greeting_response_chance** | Optional override probability (0-1) for greeting-like messages (`hi`, `hello`, etc.) in autonomous mode.<br /><br />Default: `1.0` |
 | **response_priority_weight** | Multiplier applied to autonomous participation chance. Values over `1` make this bot more likely to join; values under `1` make it quieter.<br /><br />Default: `1.0` |
+| **followup_response_chance** | After one bot has already claimed a message, probability (0-1) this bot can become the follow-up responder for that same source message.<br /><br />Default: `0.15` |
+| **max_responses_per_source_message** | Hard cap on total bot responses for one source message when Redis coordination is enabled. Set to `2` for "usually 1-2 replies".<br /><br />Default: `2` |
+| **source_message_window_seconds** | TTL window for tracking response count per source message in Redis.<br /><br />Default: `180` |
+| **floor_lock_ttl_seconds** | TTL for the per-channel+message floor claim lock in Redis.<br /><br />Default: `45` |
+| **active_responder_ttl_seconds** | TTL for the per-channel active responder lock while a bot is generating/typing.<br /><br />Default: `90` |
 | **autonomous_bot_only_mode** | When `true`, in configured autonomous channels the bot can react to other bot-authored messages without requiring mentions/replies. It still ignores its own messages.<br /><br />Default: `false` |
 | **autonomous_channel_ids** | Channel/category IDs where autonomous mode is active. Leave empty to apply autonomous mode to all channels this bot can access.<br /><br />Default: `[]` |
+| **redis_url** | Optional Redis connection URL (`redis://...`). When set, enables distributed floor lock + active responder coordination across multiple bot containers.<br /><br />Default: `""` (disabled) |
 | **use_plain_responses** | When set to `true` the bot will use plaintext responses instead of embeds. Plaintext responses have a shorter character limit so the bot's messages may split more often.<br /><br />Default: `false`<br /><br />**Also disables streamed responses and warning messages.** |
 | **allow_dms** | Set to `false` to disable direct message access.<br /><br />Default: `true` |
 | **permissions** | Configure access permissions for `users`, `roles` and `channels`, each with a list of `allowed_ids` and `blocked_ids`.<br /><br />Control which `users` are admins with `admin_ids`. Admins can change the model with `/model` and DM the bot even if `allow_dms` is `false`.<br /><br />**Leave `allowed_ids` empty to allow ALL in that category.**<br /><br />**Role and channel permissions do not affect DMs.**<br /><br />**You can use [category](https://support.discord.com/hc/en-us/articles/115001580171-Channel-Categories-101) IDs to control channel permissions in groups.** |
@@ -134,6 +142,7 @@ Use one config per bot account and run all five processes at once.
 Recommended safeguards for bot-only channels:
 - Set `permissions.channels.allowed_ids` to your private channel ID in each config.
 - Keep `response_cooldown_seconds` enabled (example: `2.0`).
+- Set `redis_url` so all bot containers coordinate through distributed floor locking.
 - Set `autonomous_bot_only_mode: true` and populate `autonomous_channel_ids` with your private channel ID.
 - Keep role-specific `system_prompt` text so each bot adds different value.
 

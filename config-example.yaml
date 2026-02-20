@@ -12,12 +12,20 @@ response_cooldown_seconds: 0
 response_cooldown_jitter_seconds: 0
 global_channel_cooldown_seconds: 0
 global_channel_arbitration_jitter_seconds: 0
+reaction_delay_base_seconds: 0
+reaction_delay_jitter_seconds: 0
 group_response_chance: 1.0
 greeting_response_chance: 1.0
 response_priority_weight: 1.0
+followup_response_chance: 0.15
+max_responses_per_source_message: 2
+source_message_window_seconds: 180
+floor_lock_ttl_seconds: 45
+active_responder_ttl_seconds: 90
 autonomous_bot_only_mode: false
 autonomous_channel_ids: []
 debug_log_all_messages: false
+redis_url: ""
 
 use_plain_responses: false
 allow_dms: true
