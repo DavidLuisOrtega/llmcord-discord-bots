@@ -81,6 +81,16 @@ Or run local models with:
 | **max_text** | The maximum amount of text allowed in a single message, including text from file attachments.<br /><br />Default: `100,000` |
 | **max_images** | The maximum number of image attachments allowed in a single message.<br /><br />Default: `5`<br /><br />**Only applicable when using a vision model.** |
 | **max_messages** | The maximum number of messages allowed in a reply chain. When exceeded, the oldest messages are dropped.<br /><br />Default: `25` |
+| **max_response_chars** | Hard cap for each bot reply length. Set to `0` to disable. Useful for shorter multi-bot turns.<br /><br />Default: `0` |
+| **response_cooldown_seconds** | Minimum delay between this bot's responses in the same channel/thread. Useful to reduce runaway bot-to-bot loops.<br /><br />Default: `0` (disabled) |
+| **response_cooldown_jitter_seconds** | Adds random delay on top of `response_cooldown_seconds` (uniform range from `0` to this value) so bot turns are less synchronized.<br /><br />Default: `0` |
+| **global_channel_cooldown_seconds** | Shared channel-level cooldown based on recent bot messages in channel history. Helps prevent many bots posting back-to-back at once.<br /><br />Default: `0` (disabled) |
+| **global_channel_arbitration_jitter_seconds** | Small random wait before checking channel history to decide which bot wins a turn when several are triggered together.<br /><br />Default: `0` |
+| **group_response_chance** | In autonomous mode, probability (0-1) this bot responds to a non-directed message (not explicitly @mentioned and not a direct reply).<br /><br />Default: `1.0` |
+| **greeting_response_chance** | Optional override probability (0-1) for greeting-like messages (`hi`, `hello`, etc.) in autonomous mode.<br /><br />Default: `1.0` |
+| **response_priority_weight** | Multiplier applied to autonomous participation chance. Values over `1` make this bot more likely to join; values under `1` make it quieter.<br /><br />Default: `1.0` |
+| **autonomous_bot_only_mode** | When `true`, in configured autonomous channels the bot can react to other bot-authored messages without requiring mentions/replies. It still ignores its own messages.<br /><br />Default: `false` |
+| **autonomous_channel_ids** | Channel/category IDs where autonomous mode is active. Leave empty to apply autonomous mode to all channels this bot can access.<br /><br />Default: `[]` |
 | **use_plain_responses** | When set to `true` the bot will use plaintext responses instead of embeds. Plaintext responses have a shorter character limit so the bot's messages may split more often.<br /><br />Default: `false`<br /><br />**Also disables streamed responses and warning messages.** |
 | **allow_dms** | Set to `false` to disable direct message access.<br /><br />Default: `true` |
 | **permissions** | Configure access permissions for `users`, `roles` and `channels`, each with a list of `allowed_ids` and `blocked_ids`.<br /><br />Control which `users` are admins with `admin_ids`. Admins can change the model with `/model` and DM the bot even if `allow_dms` is `false`.<br /><br />**Leave `allowed_ids` empty to allow ALL in that category.**<br /><br />**Role and channel permissions do not affect DMs.**<br /><br />**You can use [category](https://support.discord.com/hc/en-us/articles/115001580171-Channel-Categories-101) IDs to control channel permissions in groups.** |
@@ -101,10 +111,45 @@ Or run local models with:
    python llmcord.py
    ```
 
+   To use a different config file:
+   ```bash
+   CONFIG_FILE=config_somebot.yaml python llmcord.py
+   ```
+
    **With Docker:**
    ```bash
    docker compose up
    ```
+
+## Five-bot private channel setup
+
+Use one config per bot account and run all five processes at once.
+
+- `config_advocate.yaml`
+- `config_architect.yaml`
+- `config_coder.yaml`
+- `config_creative.yaml`
+- `config_security.yaml`
+
+Recommended safeguards for bot-only channels:
+- Set `permissions.channels.allowed_ids` to your private channel ID in each config.
+- Keep `response_cooldown_seconds` enabled (example: `2.0`).
+- Set `autonomous_bot_only_mode: true` and populate `autonomous_channel_ids` with your private channel ID.
+- Keep role-specific `system_prompt` text so each bot adds different value.
+
+Local run (5 terminals):
+```bash
+CONFIG_FILE=config_advocate.yaml python llmcord.py
+CONFIG_FILE=config_architect.yaml python llmcord.py
+CONFIG_FILE=config_coder.yaml python llmcord.py
+CONFIG_FILE=config_creative.yaml python llmcord.py
+CONFIG_FILE=config_security.yaml python llmcord.py
+```
+
+Docker run (all 5 at once):
+```bash
+docker compose up --build
+```
 
 ## Notes
 

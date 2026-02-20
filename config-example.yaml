@@ -7,6 +7,17 @@ status_message:
 max_text: 100000
 max_images: 5
 max_messages: 25
+max_response_chars: 0
+response_cooldown_seconds: 0
+response_cooldown_jitter_seconds: 0
+global_channel_cooldown_seconds: 0
+global_channel_arbitration_jitter_seconds: 0
+group_response_chance: 1.0
+greeting_response_chance: 1.0
+response_priority_weight: 1.0
+autonomous_bot_only_mode: false
+autonomous_channel_ids: []
+debug_log_all_messages: false
 
 use_plain_responses: false
 allow_dms: true

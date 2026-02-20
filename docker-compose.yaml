@@ -1,7 +1,45 @@
 services:
-  container:
+  bot_advocate:
     build: .
     network_mode: host
     restart: unless-stopped
+    environment:
+      CONFIG_FILE: config_advocate.yaml
+    volumes:
+      - ./:/app:ro
+
+  bot_architect:
+    build: .
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      CONFIG_FILE: config_architect.yaml
+    volumes:
+      - ./:/app:ro
+
+  bot_coder:
+    build: .
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      CONFIG_FILE: config_coder.yaml
+    volumes:
+      - ./:/app:ro
+
+  bot_creative:
+    build: .
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      CONFIG_FILE: config_creative.yaml
+    volumes:
+      - ./:/app:ro
+
+  bot_security:
+    build: .
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      CONFIG_FILE: config_security.yaml
     volumes:
       - ./:/app:ro

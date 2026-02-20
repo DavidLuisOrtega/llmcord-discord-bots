@@ -3,6 +3,9 @@ from base64 import b64encode
 from dataclasses import dataclass, field
 from datetime import datetime
 import logging
+import os
+import random
+from time import monotonic
 from typing import Any, Literal, Optional
 
 import discord
@@ -28,11 +31,24 @@ STREAMING_INDICATOR = " ⚪"
 EDIT_DELAY_SECONDS = 1
 
 MAX_MESSAGE_NODES = 500
+GREETING_PREFIXES = ("hi", "hello", "hey", "yo", "sup", "what's up", "whats up", "good morning", "good afternoon", "good evening")
 
 
-def get_config(filename: str = "config.yaml") -> dict[str, Any]:
-    with open(filename, encoding="utf-8") as file:
+CONFIG_FILENAME = os.getenv("CONFIG_FILE", "config.yaml")
+
+
+def get_config(filename: Optional[str] = None) -> dict[str, Any]:
+    with open(filename or CONFIG_FILENAME, encoding="utf-8") as file:
         return yaml.safe_load(file)
+
+
+def clamp_01(value: float) -> float:
+    return max(0.0, min(1.0, value))
+
+
+def is_greeting_message(content: str) -> bool:
+    normalized = " ".join(content.lower().split())
+    return any(normalized.startswith(prefix) for prefix in GREETING_PREFIXES)
 
 
 config = get_config()
@@ -40,6 +56,8 @@ curr_model = next(iter(config["models"]))
 
 msg_nodes = {}
 last_task_time = 0
+next_response_time_by_channel = {}
+cooldown_lock = asyncio.Lock()
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -105,17 +123,70 @@ async def on_ready() -> None:
 
 @discord_bot.event
 async def on_message(new_msg: discord.Message) -> None:
-    global last_task_time
+    global last_task_time, next_response_time_by_channel
 
     is_dm = new_msg.channel.type == discord.ChannelType.private
 
-    if (not is_dm and discord_bot.user not in new_msg.mentions) or new_msg.author.bot:
+    config = await asyncio.to_thread(get_config)
+
+    if config.get("debug_log_all_messages", False):
+        is_mentioned = bool(discord_bot.user and discord_bot.user in new_msg.mentions)
+        logging.info(
+            "Event seen: author_id=%s author_is_bot=%s channel_id=%s is_dm=%s mentioned=%s",
+            new_msg.author.id,
+            new_msg.author.bot,
+            new_msg.channel.id,
+            is_dm,
+            is_mentioned,
+        )
+
+    # Ignore only this bot's own messages so different bot users can still collaborate.
+    if discord_bot.user and new_msg.author.id == discord_bot.user.id:
         return
+
+    has_direct_mention = bool(discord_bot.user and discord_bot.user in new_msg.mentions)
+
+    async def is_reply_to_this_bot() -> bool:
+        if not (parent_msg_id := getattr(new_msg.reference, "message_id", None)):
+            return False
+
+        try:
+            parent_msg = new_msg.reference.cached_message or await new_msg.channel.fetch_message(parent_msg_id)
+        except (discord.NotFound, discord.HTTPException):
+            return False
+
+        return bool(discord_bot.user and parent_msg.author.id == discord_bot.user.id)
 
     role_ids = set(role.id for role in getattr(new_msg.author, "roles", ()))
     channel_ids = set(filter(None, (new_msg.channel.id, getattr(new_msg.channel, "parent_id", None), getattr(new_msg.channel, "category_id", None))))
 
-    config = await asyncio.to_thread(get_config)
+    if not is_dm:
+        autonomous_bot_only_mode = config.get("autonomous_bot_only_mode", False)
+        autonomous_channel_ids = set(config.get("autonomous_channel_ids", []))
+        in_autonomous_scope = autonomous_bot_only_mode and (not autonomous_channel_ids or any(id in autonomous_channel_ids for id in channel_ids))
+
+        if in_autonomous_scope:
+            # Explicit @mentions/replies should always trigger in autonomous channels.
+            if has_direct_mention or await is_reply_to_this_bot():
+                should_process = True
+            else:
+                # Otherwise, use per-bot probabilistic participation to avoid dogpiles.
+                group_response_chance = clamp_01(float(config.get("group_response_chance", 1.0) or 1.0))
+                greeting_response_chance = config.get("greeting_response_chance")
+                response_priority_weight = max(float(config.get("response_priority_weight", 1.0) or 1.0), 0.0)
+
+                effective_chance = group_response_chance
+                if greeting_response_chance is not None and is_greeting_message(new_msg.content):
+                    effective_chance = clamp_01(float(greeting_response_chance or 0.0))
+
+                effective_chance = clamp_01(effective_chance * response_priority_weight)
+                should_process = random.random() < effective_chance
+        else:
+            should_process = has_direct_mention or await is_reply_to_this_bot()
+
+        if not should_process:
+            return
+
 
     allow_dms = config.get("allow_dms", True)
 
@@ -138,6 +209,37 @@ async def on_message(new_msg: discord.Message) -> None:
     if is_bad_user or is_bad_channel:
         return
 
+    global_channel_cooldown_seconds = max(float(config.get("global_channel_cooldown_seconds", 0) or 0), 0)
+    global_channel_arbitration_jitter_seconds = max(float(config.get("global_channel_arbitration_jitter_seconds", 0) or 0), 0)
+    if not is_dm and (global_channel_cooldown_seconds > 0 or global_channel_arbitration_jitter_seconds > 0):
+        if global_channel_arbitration_jitter_seconds > 0:
+            await asyncio.sleep(random.uniform(0, global_channel_arbitration_jitter_seconds))
+
+        try:
+            recent_channel_msgs = [m async for m in new_msg.channel.history(limit=25)]
+        except (discord.NotFound, discord.HTTPException):
+            recent_channel_msgs = []
+
+        latest_channel_msg = recent_channel_msgs[0] if recent_channel_msgs else None
+        # If another bot has already replied after this trigger message, back off.
+        if latest_channel_msg and latest_channel_msg.id != new_msg.id and latest_channel_msg.author.bot and latest_channel_msg.created_at > new_msg.created_at:
+            return
+
+        if global_channel_cooldown_seconds > 0:
+            latest_bot_msg = next((m for m in recent_channel_msgs if m.author.bot and m.id != new_msg.id), None)
+            if latest_bot_msg and (discord.utils.utcnow() - latest_bot_msg.created_at).total_seconds() < global_channel_cooldown_seconds:
+                return
+
+    response_cooldown_seconds = max(float(config.get("response_cooldown_seconds", 0) or 0), 0)
+    response_cooldown_jitter_seconds = max(float(config.get("response_cooldown_jitter_seconds", 0) or 0), 0)
+    if response_cooldown_seconds > 0 or response_cooldown_jitter_seconds > 0:
+        channel_id = new_msg.channel.id
+        curr_time = monotonic()
+        async with cooldown_lock:
+            if curr_time < next_response_time_by_channel.get(channel_id, 0):
+                return
+            next_response_time_by_channel[channel_id] = curr_time + response_cooldown_seconds + random.uniform(0, response_cooldown_jitter_seconds)
+
     provider_slash_model = curr_model
     provider, model = provider_slash_model.removesuffix(":vision").split("/", 1)
 
@@ -159,6 +261,7 @@ async def on_message(new_msg: discord.Message) -> None:
     max_text = config.get("max_text", 100000)
     max_images = config.get("max_images", 5) if accept_images else 0
     max_messages = config.get("max_messages", 25)
+    max_response_chars = max(int(config.get("max_response_chars", 0) or 0), 0)
 
     # Build message chain and set user warnings
     messages = []
@@ -291,6 +394,17 @@ async def on_message(new_msg: discord.Message) -> None:
 
                 if response_contents == [] and new_content == "":
                     continue
+
+                # Hard-cap assistant output size when configured.
+                if max_response_chars > 0:
+                    total_chars = sum(len(content) for content in response_contents)
+                    remaining_chars = max_response_chars - total_chars
+                    if remaining_chars <= 0:
+                        finish_reason = "length"
+                        break
+                    if len(new_content) > remaining_chars:
+                        new_content = new_content[:remaining_chars]
+                        finish_reason = "length"
 
                 if start_next_msg := response_contents == [] or len(response_contents[-1] + new_content) > max_message_length:
                     response_contents.append("")
