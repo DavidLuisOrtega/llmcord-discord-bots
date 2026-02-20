@@ -95,10 +95,29 @@ def now_ts() -> float:
     return datetime.now(timezone.utc).timestamp()
 
 
-def parse_afk_followup_delays(curr_config: dict[str, Any]) -> list[float]:
-    first = max(float(curr_config.get("afk_first_followup_seconds", 600) or 0), 0)
-    second = max(float(curr_config.get("afk_second_followup_seconds", 3600) or 0), 0)
-    return [delay for delay in (first, second) if delay > 0]
+def build_afk_followup_delays(curr_config: dict[str, Any]) -> list[float]:
+    base_pairs = [
+        (
+            max(float(curr_config.get("afk_first_followup_seconds", 600) or 0), 0),
+            max(float(curr_config.get("afk_first_followup_jitter_seconds", 0) or 0), 0),
+        ),
+        (
+            max(float(curr_config.get("afk_second_followup_seconds", 3600) or 0), 0),
+            max(float(curr_config.get("afk_second_followup_jitter_seconds", 0) or 0), 0),
+        ),
+    ]
+
+    delays = []
+    for base_delay, jitter in base_pairs:
+        if base_delay <= 0:
+            continue
+        if jitter > 0:
+            sampled_delay = max(0.0, base_delay + random.uniform(-jitter, jitter))
+        else:
+            sampled_delay = base_delay
+        delays.append(sampled_delay)
+
+    return delays
 
 
 def message_looks_open_ended(content: str) -> bool:
@@ -140,6 +159,125 @@ def in_quiet_hours(curr_config: dict[str, Any]) -> bool:
     return hour >= start_hour or hour < end_hour
 
 
+def get_timezone(curr_config: dict[str, Any]):
+    tz_name = str(curr_config.get("quiet_hours_timezone", "UTC") or "UTC")
+    try:
+        return ZoneInfo(tz_name)
+    except Exception:
+        return timezone.utc
+
+
+def today_key(curr_config: dict[str, Any]) -> str:
+    return datetime.now(timezone.utc).astimezone(get_timezone(curr_config)).strftime("%Y-%m-%d")
+
+
+async def maybe_send_proactive_starter(curr_config: dict[str, Any], redis_client_instance, channel_id: int) -> None:
+    if not curr_config.get("proactive_starters_enabled", False):
+        return
+    if in_quiet_hours(curr_config) and curr_config.get("proactive_respect_quiet_hours", True):
+        return
+
+    now = now_ts()
+    human_idle_seconds = max(float(curr_config.get("proactive_idle_human_seconds", 1800) or 0), 0)
+    channel_idle_seconds = max(float(curr_config.get("proactive_idle_channel_seconds", 900) or 0), 0)
+    chance = clamp_01(float(curr_config.get("proactive_starter_chance", 0.35) or 0.35))
+    max_daily = max(int(float(curr_config.get("proactive_max_per_day_per_channel", 6) or 6)), 0)
+    claim_ttl_seconds = max(int(float(curr_config.get("proactive_claim_ttl_seconds", 45) or 45)), 10)
+    mention_enabled = bool(curr_config.get("proactive_mention_enabled", False))
+    mention_chance = clamp_01(float(curr_config.get("proactive_mention_chance", 0.5) or 0.5))
+    mention_recent_user_seconds = max(float(curr_config.get("proactive_mention_recent_user_seconds", 172800) or 0), 0)
+    mention_max_per_user_per_day = max(int(float(curr_config.get("proactive_mention_max_per_user_per_day", 1) or 1)), 0)
+
+    last_human_ts = float(await redis_client_instance.get(f"llmcord:afk:last_human_ts:{channel_id}") or 0)
+    last_any_msg_ts = float(await redis_client_instance.get(f"llmcord:channel:last_message_ts:{channel_id}") or 0)
+    if human_idle_seconds > 0 and now - last_human_ts < human_idle_seconds:
+        return
+    if channel_idle_seconds > 0 and now - last_any_msg_ts < channel_idle_seconds:
+        return
+    if await redis_client_instance.get(f"llmcord:active_responder:{channel_id}"):
+        return
+    if random.random() > chance:
+        return
+
+    day_key = today_key(curr_config)
+    daily_key = f"llmcord:proactive:daily:{channel_id}:{day_key}"
+    if max_daily > 0 and int(await redis_client_instance.get(daily_key) or 0) >= max_daily:
+        return
+
+    claim_key = f"llmcord:proactive:claim:{channel_id}"
+    claimed = await redis_client_instance.set(claim_key, get_bot_identity(), ex=claim_ttl_seconds, nx=True)
+    if not claimed:
+        return
+
+    channel = discord_bot.get_channel(channel_id)
+    if channel is None:
+        try:
+            channel = await discord_bot.fetch_channel(channel_id)
+        except (discord.NotFound, discord.HTTPException):
+            channel = None
+    if channel is None:
+        return
+
+    templates = curr_config.get("proactive_starter_templates") or [
+        "random check-in: what's one good thing from today?",
+        "low-stakes poll: movie night, game night, or food crawl?",
+        "drop one plan for tonight if you're around.",
+    ]
+    mention_templates = curr_config.get("proactive_mention_templates") or [
+        "{mention} if you're around, what's your vote for tonight?",
+        "{mention} curious what your take is here when you have a sec.",
+    ]
+
+    target_user_id = None
+    if mention_enabled and mention_max_per_user_per_day > 0 and random.random() <= mention_chance:
+        recent_humans_key = f"llmcord:channel:recent_humans:{channel_id}"
+        min_recent_ts = now - mention_recent_user_seconds
+        candidate_user_ids = await redis_client_instance.zrevrangebyscore(recent_humans_key, max="+inf", min=min_recent_ts, start=0, num=25)
+        random.shuffle(candidate_user_ids)
+
+        for candidate_user_id_str in candidate_user_ids:
+            try:
+                candidate_user_id = int(candidate_user_id_str)
+            except ValueError:
+                continue
+            if discord_bot.user and candidate_user_id == discord_bot.user.id:
+                continue
+
+            mention_daily_key = f"llmcord:proactive:mention_user_daily:{channel_id}:{candidate_user_id}:{day_key}"
+            mention_count = int(await redis_client_instance.get(mention_daily_key) or 0)
+            if mention_count >= mention_max_per_user_per_day:
+                continue
+
+            target_user_id = candidate_user_id
+            break
+
+    if target_user_id is not None:
+        mention = f"<@{target_user_id}>"
+        starter_text = random.choice(mention_templates).replace("{mention}", mention)
+    else:
+        starter_text = random.choice(templates)
+
+    try:
+        await channel.send(
+            starter_text,
+            silent=True,
+            allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+        )
+    except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+        return
+
+    ttl_seconds = 3 * 24 * 3600
+    daily_count = await redis_client_instance.incr(daily_key)
+    if daily_count == 1:
+        await redis_client_instance.expire(daily_key, ttl_seconds)
+    await redis_client_instance.set(f"llmcord:channel:last_message_ts:{channel_id}", now, ex=7 * 24 * 3600)
+    if target_user_id is not None and mention_max_per_user_per_day > 0:
+        mention_daily_key = f"llmcord:proactive:mention_user_daily:{channel_id}:{target_user_id}:{day_key}"
+        mention_daily_count = await redis_client_instance.incr(mention_daily_key)
+        if mention_daily_count == 1:
+            await redis_client_instance.expire(mention_daily_key, ttl_seconds)
+
+
 async def maybe_schedule_afk_followup(new_msg: discord.Message, curr_config: dict[str, Any], redis_client_instance) -> None:
     if new_msg.channel.type == discord.ChannelType.private or new_msg.author.bot:
         return
@@ -150,7 +288,7 @@ async def maybe_schedule_afk_followup(new_msg: discord.Message, curr_config: dic
     if curr_config.get("afk_open_question_only", True) and not message_looks_open_ended(new_msg.content):
         return
 
-    delays = parse_afk_followup_delays(curr_config)
+    delays = build_afk_followup_delays(curr_config)
     if delays == []:
         return
 
@@ -299,6 +437,17 @@ async def afk_followup_scheduler_loop() -> None:
             for item_id in due_item_ids:
                 await process_afk_followup_item(item_id, curr_config, redis_client_instance)
 
+            if curr_config.get("proactive_starters_enabled", False):
+                configured_channel_ids = set(curr_config.get("proactive_channel_ids") or [])
+                if configured_channel_ids == set():
+                    observed_channel_ids = {int(x) for x in await redis_client_instance.smembers("llmcord:observed_channels")}
+                    candidate_channel_ids = observed_channel_ids
+                else:
+                    candidate_channel_ids = configured_channel_ids
+
+                for channel_id in sorted(candidate_channel_ids):
+                    await maybe_send_proactive_starter(curr_config, redis_client_instance, int(channel_id))
+
             await asyncio.sleep(poll_seconds + random.uniform(0, 0.5))
         except asyncio.CancelledError:
             return
@@ -308,6 +457,7 @@ async def afk_followup_scheduler_loop() -> None:
 
 intents = discord.Intents.default()
 intents.message_content = True
+intents.members = True
 activity = discord.CustomActivity(name=(config.get("status_message") or "github.com/jakobdylanc/llmcord")[:128])
 discord_bot = commands.Bot(intents=intents, activity=activity, command_prefix=None)
 
@@ -468,8 +618,18 @@ async def on_message(new_msg: discord.Message) -> None:
             logging.exception("Redis unavailable, continuing without distributed coordination")
             redis_client_instance = None
 
-        if not new_msg.author.bot:
-            await maybe_schedule_afk_followup(new_msg, config, redis_client_instance)
+        if redis_client_instance is not None:
+            channel_id = new_msg.channel.id
+            now = now_ts()
+            await redis_client_instance.sadd("llmcord:observed_channels", str(channel_id))
+            await redis_client_instance.set(f"llmcord:channel:last_message_ts:{channel_id}", now, ex=7 * 24 * 3600)
+
+            if not new_msg.author.bot:
+                await redis_client_instance.set(f"llmcord:afk:last_human_ts:{channel_id}", now, ex=7 * 24 * 3600)
+                recent_humans_key = f"llmcord:channel:recent_humans:{channel_id}"
+                await redis_client_instance.zadd(recent_humans_key, {str(new_msg.author.id): now})
+                await redis_client_instance.expire(recent_humans_key, 14 * 24 * 3600)
+                await maybe_schedule_afk_followup(new_msg, config, redis_client_instance)
 
         if not should_process:
             return
