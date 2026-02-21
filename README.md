@@ -121,14 +121,17 @@ Or run local models with:
 | **proactive_max_per_day_per_channel** | Daily cap for proactive starters per channel.<br /><br />Default: `6` |
 | **proactive_claim_ttl_seconds** | Distributed lock TTL for proactive starter claims per channel.<br /><br />Default: `45` |
 | **proactive_channel_ids** | Optional list of channel IDs eligible for proactive starters. Empty means use observed channels.<br /><br />Default: `[]` |
+| **proactive_generation_retries** | Number of generation attempts for proactive openers before fallback text is used.<br /><br />Default: `3` |
+| **proactive_dedupe_window_seconds** | Duplicate suppression window for proactive starter text in a channel.<br /><br />Default: `86400` |
+| **proactive_generated_max_chars** | Max characters for generated proactive starters.<br /><br />Default: `180` |
+| **proactive_fallback_starter** | Fallback proactive message if generation fails or all attempts are duplicates.<br /><br />Default: `quick check-in...` |
 | **proactive_mention_enabled** | When `true`, proactive starters may @mention a recently active human in-channel.<br /><br />Default: `false` |
 | **proactive_mention_chance** | Probability (0-1) a proactive starter attempt uses a targeted @mention format.<br /><br />Default: `0.5` |
 | **proactive_mention_recent_user_seconds** | How far back to consider users as "recently active" for proactive @mentions.<br /><br />Default: `172800` (48 hours) |
 | **proactive_mention_max_per_user_per_day** | Per-user daily cap for proactive in-channel @mentions.<br /><br />Default: `1` |
-| **proactive_starter_templates** | Candidate short opener lines used for proactive bot-initiated messages.<br /><br />Default: three generic templates |
-| **proactive_mention_templates** | Candidate templates for targeted proactive starters. Use `{mention}` placeholder to insert a user ping.<br /><br />Default: two templates |
 | **afk_followup_templates** | Candidate short follow-up lines used when AFK reminders trigger.<br /><br />Default: two generic templates |
 | **generated_user_mentions_mode** | Mention policy for generated replies: `always`, `question_only`, or `never`. `question_only` strips user mentions unless the message is phrased as a question.<br /><br />Default: `question_only` |
+| **strict_reply_targeting** | When `true`, replies to another bot's message are ignored unless this bot is explicitly @mentioned. Prevents cross-bot hijacking of direct replies.<br /><br />Default: `true` |
 | **use_plain_responses** | When set to `true` the bot will use plaintext responses instead of embeds. Plaintext responses have a shorter character limit so the bot's messages may split more often.<br /><br />Default: `false`<br /><br />**Also disables streamed responses and warning messages.** |
 | **allow_dms** | Set to `false` to disable direct message access.<br /><br />Default: `true` |
 | **permissions** | Configure access permissions for `users`, `roles` and `channels`, each with a list of `allowed_ids` and `blocked_ids`.<br /><br />Control which `users` are admins with `admin_ids`. Admins can change the model with `/model` and DM the bot even if `allow_dms` is `false`.<br /><br />**Leave `allowed_ids` empty to allow ALL in that category.**<br /><br />**Role and channel permissions do not affect DMs.**<br /><br />**You can use [category](https://support.discord.com/hc/en-us/articles/115001580171-Channel-Categories-101) IDs to control channel permissions in groups.** |

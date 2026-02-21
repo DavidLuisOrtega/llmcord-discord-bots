@@ -2,6 +2,7 @@ import asyncio
 from base64 import b64encode
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from hashlib import sha256
 import logging
 import os
 import random
@@ -160,6 +161,36 @@ def apply_generated_mention_policy(content: str, curr_config: dict[str, Any]) ->
     return cleaned
 
 
+def build_system_prompt_for_model(curr_config: dict[str, Any], accept_usernames: bool) -> Optional[str]:
+    if not (system_prompt := curr_config.get("system_prompt")):
+        return None
+
+    now = datetime.now().astimezone()
+    system_prompt = system_prompt.replace("{date}", now.strftime("%B %d %Y")).replace("{time}", now.strftime("%H:%M:%S %Z%z")).strip()
+    if accept_usernames:
+        system_prompt += "\n\nUser identifiers are Discord IDs. Prefer normal feed-style replies; only use '<@ID>' when directly addressing a specific person."
+    return system_prompt
+
+
+def normalize_text_for_dedupe(value: str) -> str:
+    normalized = value.lower().strip()
+    normalized = re.sub(r"\s+", " ", normalized)
+    normalized = re.sub(r"<@!?\d+>", "<@user>", normalized)
+    normalized = re.sub(r"[^a-z0-9<@> ?!.,'-]", "", normalized)
+    return normalized
+
+
+def sanitize_proactive_message(raw_text: str, max_chars: int, target_user_id: Optional[int]) -> str:
+    text = (raw_text or "").strip()
+    text = re.sub(r"@everyone|@here|<@&\d+>", "", text)
+    if target_user_id is None:
+        text = re.sub(r"<@!?\d+>", "", text)
+    text = re.sub(r"[ \t]{2,}", " ", text).strip()
+    if max_chars > 0:
+        text = text[:max_chars].rstrip()
+    return text
+
+
 def in_quiet_hours(curr_config: dict[str, Any]) -> bool:
     if not curr_config.get("quiet_hours_enabled", False):
         return False
@@ -191,6 +222,68 @@ def get_timezone(curr_config: dict[str, Any]):
 
 def today_key(curr_config: dict[str, Any]) -> str:
     return datetime.now(timezone.utc).astimezone(get_timezone(curr_config)).strftime("%Y-%m-%d")
+
+
+async def generate_proactive_starter_text(curr_config: dict[str, Any], target_user_id: Optional[int], max_chars: int) -> str:
+    provider_slash_model = curr_model
+    provider, model = provider_slash_model.removesuffix(":vision").split("/", 1)
+    provider_config = curr_config["providers"][provider]
+    openai_client = AsyncOpenAI(base_url=provider_config["base_url"], api_key=provider_config.get("api_key", "sk-no-key-required"))
+
+    model_parameters = curr_config["models"].get(provider_slash_model, None)
+    extra_headers = provider_config.get("extra_headers")
+    extra_query = provider_config.get("extra_query")
+    extra_body = (provider_config.get("extra_body") or {}) | (model_parameters or {}) or None
+
+    accept_usernames = any(provider_slash_model.lower().startswith(x) for x in PROVIDERS_SUPPORTING_USERNAMES)
+    system_prompt = build_system_prompt_for_model(curr_config, accept_usernames)
+
+    mention_instruction = (
+        f"Start with '<@{target_user_id}>' and ask that person directly."
+        if target_user_id is not None
+        else "Do not include any user mentions."
+    )
+    user_instruction = (
+        "Write exactly one short proactive Discord message to re-start casual chat naturally. "
+        f"Keep it under {max_chars} characters, one sentence, conversational, and not repetitive. "
+        "No lists, no markdown, no hashtags, no @everyone, no @here, no role mentions. "
+        f"{mention_instruction}"
+    )
+
+    messages: list[dict[str, str]] = [dict(role="user", content=user_instruction)]
+    if system_prompt:
+        messages.append(dict(role="system", content=system_prompt))
+
+    try:
+        response = await openai_client.chat.completions.create(
+            model=model,
+            messages=messages[::-1],
+            stream=False,
+            extra_headers=extra_headers,
+            extra_query=extra_query,
+            extra_body=extra_body,
+        )
+    except Exception:
+        logging.exception("Error generating proactive starter text")
+        return ""
+
+    content = ""
+    if response.choices:
+        message_content = response.choices[0].message.content
+        if isinstance(message_content, str):
+            content = message_content
+        elif isinstance(message_content, list):
+            content = "".join(
+                part.get("text", "")
+                for part in message_content
+                if isinstance(part, dict)
+            )
+
+    content = sanitize_proactive_message(content, max_chars, target_user_id)
+    if target_user_id is not None and content != "" and "<@" not in content:
+        content = f"<@{target_user_id}> {content}".strip()
+        content = sanitize_proactive_message(content, max_chars, target_user_id)
+    return content
 
 
 async def maybe_send_proactive_starter(curr_config: dict[str, Any], redis_client_instance, channel_id: int) -> None:
@@ -240,16 +333,6 @@ async def maybe_send_proactive_starter(curr_config: dict[str, Any], redis_client
     if channel is None:
         return
 
-    templates = curr_config.get("proactive_starter_templates") or [
-        "random check-in: what's one good thing from today?",
-        "low-stakes poll: movie night, game night, or food crawl?",
-        "drop one plan for tonight if you're around.",
-    ]
-    mention_templates = curr_config.get("proactive_mention_templates") or [
-        "{mention} if you're around, what's your vote for tonight?",
-        "{mention} curious what your take is here when you have a sec.",
-    ]
-
     target_user_id = None
     if mention_enabled and mention_max_per_user_per_day > 0 and random.random() <= mention_chance:
         recent_humans_key = f"llmcord:channel:recent_humans:{channel_id}"
@@ -273,11 +356,39 @@ async def maybe_send_proactive_starter(curr_config: dict[str, Any], redis_client
             target_user_id = candidate_user_id
             break
 
-    if target_user_id is not None:
-        mention = f"<@{target_user_id}>"
-        starter_text = random.choice(mention_templates).replace("{mention}", mention)
-    else:
-        starter_text = random.choice(templates)
+    retries = max(int(float(curr_config.get("proactive_generation_retries", 3) or 3)), 1)
+    dedupe_window_seconds = max(int(float(curr_config.get("proactive_dedupe_window_seconds", 86400) or 86400)), 60)
+    proactive_max_chars = max(int(float(curr_config.get("proactive_generated_max_chars", 180) or 180)), 40)
+    proactive_hashes_key = f"llmcord:proactive:text_hashes:{channel_id}"
+
+    await redis_client_instance.zremrangebyscore(proactive_hashes_key, min=0, max=now - dedupe_window_seconds)
+
+    starter_text = None
+    starter_text_hash = None
+    for _ in range(retries):
+        candidate_text = await generate_proactive_starter_text(curr_config, target_user_id, proactive_max_chars)
+        if candidate_text == "":
+            continue
+
+        normalized = normalize_text_for_dedupe(candidate_text)
+        if normalized == "":
+            continue
+
+        text_hash = sha256(normalized.encode("utf-8")).hexdigest()
+        if await redis_client_instance.zscore(proactive_hashes_key, text_hash) is not None:
+            continue
+
+        starter_text = candidate_text
+        starter_text_hash = text_hash
+        break
+
+    if starter_text is None:
+        fallback_text = str(curr_config.get("proactive_fallback_starter", "quick check-in: if you're around, what's the vibe tonight?") or "")
+        starter_text = sanitize_proactive_message(fallback_text, proactive_max_chars, target_user_id)
+        if target_user_id is not None and "<@" not in starter_text:
+            starter_text = f"<@{target_user_id}> {starter_text}".strip()
+        if starter_text == "":
+            return
 
     try:
         await channel.send(
@@ -287,6 +398,10 @@ async def maybe_send_proactive_starter(curr_config: dict[str, Any], redis_client
         )
     except (discord.Forbidden, discord.NotFound, discord.HTTPException):
         return
+
+    if starter_text_hash is not None:
+        await redis_client_instance.zadd(proactive_hashes_key, {starter_text_hash: now})
+        await redis_client_instance.expire(proactive_hashes_key, dedupe_window_seconds + 24 * 3600)
 
     ttl_seconds = 3 * 24 * 3600
     daily_count = await redis_client_instance.incr(daily_key)
@@ -570,22 +685,26 @@ async def on_message(new_msg: discord.Message) -> None:
 
     has_direct_mention = bool(discord_bot.user and discord_bot.user in new_msg.mentions)
 
-    async def is_reply_to_this_bot() -> bool:
+    async def get_reply_parent_message() -> Optional[discord.Message]:
         if not (parent_msg_id := getattr(new_msg.reference, "message_id", None)):
-            return False
+            return None
 
         try:
-            parent_msg = new_msg.reference.cached_message or await new_msg.channel.fetch_message(parent_msg_id)
+            return new_msg.reference.cached_message or await new_msg.channel.fetch_message(parent_msg_id)
         except (discord.NotFound, discord.HTTPException):
-            return False
-
-        return bool(discord_bot.user and parent_msg.author.id == discord_bot.user.id)
+            return None
 
     role_ids = set(role.id for role in getattr(new_msg.author, "roles", ()))
     channel_ids = set(filter(None, (new_msg.channel.id, getattr(new_msg.channel, "parent_id", None), getattr(new_msg.channel, "category_id", None))))
 
-    is_direct_reply = await is_reply_to_this_bot() if not is_dm else False
+    parent_msg = await get_reply_parent_message() if not is_dm else None
+    is_direct_reply = bool(parent_msg and discord_bot.user and parent_msg.author.id == discord_bot.user.id)
+    is_reply_to_other_bot = bool(parent_msg and parent_msg.author.bot and discord_bot.user and parent_msg.author.id != discord_bot.user.id)
     should_process = True
+
+    strict_reply_targeting = bool(config.get("strict_reply_targeting", True))
+    if strict_reply_targeting and is_reply_to_other_bot and not has_direct_mention:
+        return
 
     if not is_dm:
         autonomous_bot_only_mode = config.get("autonomous_bot_only_mode", False)
@@ -844,13 +963,7 @@ async def on_message(new_msg: discord.Message) -> None:
 
     logging.info(f"Message received (user ID: {new_msg.author.id}, attachments: {len(new_msg.attachments)}, conversation length: {len(messages)}):\n{new_msg.content}")
 
-    if system_prompt := config.get("system_prompt"):
-        now = datetime.now().astimezone()
-
-        system_prompt = system_prompt.replace("{date}", now.strftime("%B %d %Y")).replace("{time}", now.strftime("%H:%M:%S %Z%z")).strip()
-        if accept_usernames:
-            system_prompt += "\n\nUser identifiers are Discord IDs. Prefer normal feed-style replies; only use '<@ID>' when directly addressing a specific person."
-
+    if system_prompt := build_system_prompt_for_model(config, accept_usernames):
         messages.append(dict(role="system", content=system_prompt))
 
     # Generate and send response message(s) (can be multiple if response is long)

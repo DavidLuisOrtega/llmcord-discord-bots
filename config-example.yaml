@@ -48,21 +48,19 @@ proactive_starter_chance: 0.35
 proactive_max_per_day_per_channel: 6
 proactive_claim_ttl_seconds: 45
 proactive_channel_ids: []
+proactive_generation_retries: 3
+proactive_dedupe_window_seconds: 86400
+proactive_generated_max_chars: 180
+proactive_fallback_starter: "quick check-in: if you're around, what's the vibe tonight?"
 proactive_mention_enabled: false
 proactive_mention_chance: 0.5
 proactive_mention_recent_user_seconds: 172800
 proactive_mention_max_per_user_per_day: 1
-proactive_starter_templates:
-  - "random check-in: what's one good thing from today?"
-  - "low-stakes poll: movie night, game night, or food crawl?"
-  - "drop one plan for tonight if you're around."
-proactive_mention_templates:
-  - "{mention} if you're around, what's your vote for tonight?"
-  - "{mention} curious what your take is here when you have a sec."
 afk_followup_templates:
   - "no rush. drop your thoughts when you're back."
   - "whenever you're free, curious what you think."
 generated_user_mentions_mode: "question_only"  # always | question_only | never
+strict_reply_targeting: true
 
 use_plain_responses: false
 allow_dms: true
