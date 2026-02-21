@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import logging
 import os
 import random
+import re
 from time import monotonic
 from typing import Any, Literal, Optional
 from zoneinfo import ZoneInfo
@@ -35,6 +36,8 @@ EDIT_DELAY_SECONDS = 1
 
 MAX_MESSAGE_NODES = 500
 GREETING_PREFIXES = ("hi", "hello", "hey", "yo", "sup", "what's up", "whats up", "good morning", "good afternoon", "good evening")
+MENTION_TOKEN_REGEX = re.compile(r"<@!?\d+>")
+LEADING_MENTION_REGEX = re.compile(r"^(?:\s*<@!?\d+>\s*)+")
 
 
 CONFIG_FILENAME = os.getenv("CONFIG_FILE", "config.yaml")
@@ -136,6 +139,25 @@ def message_looks_open_ended(content: str) -> bool:
         "ideas",
     )
     return any(normalized.startswith(prefix) for prefix in prefixes)
+
+
+def apply_generated_mention_policy(content: str, curr_config: dict[str, Any]) -> str:
+    if content == "":
+        return content
+
+    cleaned = LEADING_MENTION_REGEX.sub("", content).lstrip()
+    mentions_mode = str(curr_config.get("generated_user_mentions_mode", "question_only") or "question_only").lower().strip()
+    if mentions_mode not in {"always", "question_only", "never"}:
+        mentions_mode = "question_only"
+
+    if mentions_mode == "never":
+        cleaned = MENTION_TOKEN_REGEX.sub("", cleaned)
+    elif mentions_mode == "question_only" and "?" not in cleaned:
+        cleaned = MENTION_TOKEN_REGEX.sub("", cleaned)
+
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned
 
 
 def in_quiet_hours(curr_config: dict[str, Any]) -> bool:
@@ -827,7 +849,7 @@ async def on_message(new_msg: discord.Message) -> None:
 
         system_prompt = system_prompt.replace("{date}", now.strftime("%B %d %Y")).replace("{time}", now.strftime("%H:%M:%S %Z%z")).strip()
         if accept_usernames:
-            system_prompt += "\n\nUser's names are their Discord IDs and should be typed as '<@ID>'."
+            system_prompt += "\n\nUser identifiers are Discord IDs. Prefer normal feed-style replies; only use '<@ID>' when directly addressing a specific person."
 
         messages.append(dict(role="system", content=system_prompt))
 
@@ -846,6 +868,7 @@ async def on_message(new_msg: discord.Message) -> None:
 
     async def reply_helper(**reply_kwargs) -> None:
         reply_target = new_msg if not response_msgs else response_msgs[-1]
+        reply_kwargs.setdefault("mention_author", False)
         response_msg = await reply_target.reply(**reply_kwargs)
         response_msgs.append(response_msg)
 
@@ -896,7 +919,8 @@ async def on_message(new_msg: discord.Message) -> None:
                     is_good_finish = finish_reason != None and finish_reason.lower() in ("stop", "end_turn")
 
                     if start_next_msg or ready_to_edit or is_final_edit:
-                        embed.description = response_contents[-1] if is_final_edit else (response_contents[-1] + STREAMING_INDICATOR)
+                        visible_content = apply_generated_mention_policy(response_contents[-1], config)
+                        embed.description = visible_content if is_final_edit else (visible_content + STREAMING_INDICATOR)
                         embed.color = EMBED_COLOR_COMPLETE if msg_split_incoming or is_good_finish else EMBED_COLOR_INCOMPLETE
 
                         if start_next_msg:
@@ -909,7 +933,8 @@ async def on_message(new_msg: discord.Message) -> None:
 
             if use_plain_responses:
                 for content in response_contents:
-                    await reply_helper(view=LayoutView().add_item(TextDisplay(content=content)))
+                    visible_content = apply_generated_mention_policy(content, config)
+                    await reply_helper(view=LayoutView().add_item(TextDisplay(content=visible_content)))
 
     except Exception:
         logging.exception("Error while generating response")
@@ -932,8 +957,9 @@ async def on_message(new_msg: discord.Message) -> None:
                 except RedisError:
                     logging.exception("Failed to roll back Redis source response count")
 
+    final_text = apply_generated_mention_policy("".join(response_contents), config)
     for response_msg in response_msgs:
-        msg_nodes[response_msg.id].text = "".join(response_contents)
+        msg_nodes[response_msg.id].text = final_text
         msg_nodes[response_msg.id].lock.release()
 
     # Delete oldest MsgNodes (lowest message IDs) from the cache

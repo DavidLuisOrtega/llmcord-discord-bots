@@ -62,6 +62,7 @@ proactive_mention_templates:
 afk_followup_templates:
   - "no rush. drop your thoughts when you're back."
   - "whenever you're free, curious what you think."
+generated_user_mentions_mode: "question_only"  # always | question_only | never
 
 use_plain_responses: false
 allow_dms: true
