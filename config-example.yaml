@@ -63,6 +63,16 @@ generated_user_mentions_mode: "question_only"  # always | question_only | never
 strict_reply_targeting: true
 direct_mention_retry_enabled: true
 direct_mention_max_wait_seconds: 7200
+treat_everyone_as_directed: false
+gif_replies_enabled: false
+gif_reply_chance: 0.1
+gif_reply_cooldown_seconds: 180
+gif_reply_max_per_hour_per_channel: 4
+gif_reply_keyword_filters: []  # Optional lowercase words to gate GIF replies
+gif_reply_urls:
+  - "https://media.giphy.com/media/JIX9t2j0ZTN9S/giphy.gif"
+  - "https://media.giphy.com/media/ICOgUNjpvO0PC/giphy.gif"
+  - "https://media.giphy.com/media/l0HlBO7eyXzSZkJri/giphy.gif"
 
 use_plain_responses: false
 allow_dms: true

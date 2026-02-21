@@ -3,12 +3,15 @@ from base64 import b64encode
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from hashlib import sha256
+import html as htmllib
+import io
 import logging
 import os
 import random
 import re
 from time import monotonic
 from typing import Any, Literal, Optional
+from urllib.parse import urljoin
 from zoneinfo import ZoneInfo
 
 import discord
@@ -39,6 +42,10 @@ MAX_MESSAGE_NODES = 500
 GREETING_PREFIXES = ("hi", "hello", "hey", "yo", "sup", "what's up", "whats up", "good morning", "good afternoon", "good evening")
 MENTION_TOKEN_REGEX = re.compile(r"<@!?\d+>")
 LEADING_MENTION_REGEX = re.compile(r"^(?:\s*<@!?\d+>\s*)+")
+META_IMAGE_REGEX = re.compile(
+    r"<meta[^>]+(?:property|name)=[\"'](?:og:image|twitter:image)[\"'][^>]+content=[\"']([^\"']+)[\"']",
+    re.IGNORECASE,
+)
 
 
 CONFIG_FILENAME = os.getenv("CONFIG_FILE", "config.yaml")
@@ -189,6 +196,117 @@ def sanitize_proactive_message(raw_text: str, max_chars: int, target_user_id: Op
     if max_chars > 0:
         text = text[:max_chars].rstrip()
     return text
+
+
+async def fetch_image_asset_from_url(url: str) -> Optional[tuple[bytes, str]]:
+    try:
+        response = await httpx_client.get(url, follow_redirects=True, timeout=20)
+    except Exception:
+        return None
+
+    content_type = (response.headers.get("content-type") or "").lower()
+    if content_type.startswith("image/"):
+        return response.content, content_type
+
+    if "text/html" in content_type:
+        match = META_IMAGE_REGEX.search(response.text or "")
+        if match:
+            candidate_url = htmllib.unescape(match.group(1)).strip()
+            if candidate_url:
+                candidate_url = urljoin(str(response.url), candidate_url)
+                try:
+                    image_response = await httpx_client.get(candidate_url, follow_redirects=True, timeout=20)
+                except Exception:
+                    return None
+
+                image_content_type = (image_response.headers.get("content-type") or "").lower()
+                if image_content_type.startswith("image/"):
+                    return image_response.content, image_content_type
+
+    return None
+
+
+async def maybe_send_curated_gif_reply(
+    trigger_msg: discord.Message,
+    reply_target: discord.Message,
+    curr_config: dict[str, Any],
+    redis_client_instance,
+    reference_text: str,
+) -> None:
+    if trigger_msg.channel.type == discord.ChannelType.private:
+        return
+    if not curr_config.get("gif_replies_enabled", False):
+        return
+
+    gif_urls = [str(url).strip() for url in (curr_config.get("gif_reply_urls") or []) if str(url).strip()]
+    if gif_urls == []:
+        return
+
+    gif_reply_chance = clamp_01(float(curr_config.get("gif_reply_chance", 0.1) or 0.1))
+    if random.random() > gif_reply_chance:
+        return
+
+    keyword_filters = [str(word).lower().strip() for word in (curr_config.get("gif_reply_keyword_filters") or []) if str(word).strip()]
+    if keyword_filters:
+        searchable = f"{trigger_msg.content}\n{reference_text}".lower()
+        if not any(keyword in searchable for keyword in keyword_filters):
+            return
+
+    gif_reply_cooldown_seconds = max(int(float(curr_config.get("gif_reply_cooldown_seconds", 180) or 180)), 0)
+    gif_reply_max_per_hour_per_channel = max(int(float(curr_config.get("gif_reply_max_per_hour_per_channel", 4) or 4)), 0)
+    now = now_ts()
+    channel_id = trigger_msg.channel.id
+
+    if redis_client_instance is not None:
+        last_gif_ts_key = f"llmcord:gif:last_ts:{channel_id}"
+        if gif_reply_cooldown_seconds > 0:
+            last_gif_ts = float(await redis_client_instance.get(last_gif_ts_key) or 0)
+            if now - last_gif_ts < gif_reply_cooldown_seconds:
+                return
+
+        hour_bucket = int(now // 3600)
+        per_hour_key = f"llmcord:gif:hour_count:{channel_id}:{hour_bucket}"
+        if gif_reply_max_per_hour_per_channel > 0:
+            hour_count = int(await redis_client_instance.get(per_hour_key) or 0)
+            if hour_count >= gif_reply_max_per_hour_per_channel:
+                return
+
+    gif_payload = None
+    randomized_urls = gif_urls[:]
+    random.shuffle(randomized_urls)
+    for candidate_url in randomized_urls:
+        gif_payload = await fetch_image_asset_from_url(candidate_url)
+        if gif_payload is not None:
+            break
+
+    if gif_payload is None:
+        return
+
+    image_bytes, image_content_type = gif_payload
+    if "gif" in image_content_type:
+        extension = "gif"
+    elif "webp" in image_content_type:
+        extension = "webp"
+    elif "png" in image_content_type:
+        extension = "png"
+    elif "jpeg" in image_content_type or "jpg" in image_content_type:
+        extension = "jpg"
+    else:
+        extension = "img"
+
+    try:
+        file = discord.File(io.BytesIO(image_bytes), filename=f"reaction.{extension}")
+        await reply_target.reply(file=file, silent=True, mention_author=False)
+    except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+        return
+
+    if redis_client_instance is not None:
+        await redis_client_instance.set(f"llmcord:gif:last_ts:{channel_id}", now, ex=max(gif_reply_cooldown_seconds, 3600))
+        hour_bucket = int(now // 3600)
+        per_hour_key = f"llmcord:gif:hour_count:{channel_id}:{hour_bucket}"
+        hour_count = await redis_client_instance.incr(per_hour_key)
+        if hour_count == 1:
+            await redis_client_instance.expire(per_hour_key, 2 * 3600)
 
 
 def in_quiet_hours(curr_config: dict[str, Any]) -> bool:
@@ -684,6 +802,8 @@ async def on_message(new_msg: discord.Message) -> None:
         return
 
     has_direct_mention = bool(discord_bot.user and discord_bot.user in new_msg.mentions)
+    treat_everyone_as_directed = bool(config.get("treat_everyone_as_directed", False))
+    has_everyone_directive = bool(getattr(new_msg, "mention_everyone", False) and treat_everyone_as_directed)
 
     async def get_reply_parent_message() -> Optional[discord.Message]:
         if not (parent_msg_id := getattr(new_msg.reference, "message_id", None)):
@@ -700,11 +820,11 @@ async def on_message(new_msg: discord.Message) -> None:
     parent_msg = await get_reply_parent_message() if not is_dm else None
     is_direct_reply = bool(parent_msg and discord_bot.user and parent_msg.author.id == discord_bot.user.id)
     is_reply_to_other_bot = bool(parent_msg and parent_msg.author.bot and discord_bot.user and parent_msg.author.id != discord_bot.user.id)
-    is_directed_message = has_direct_mention or is_direct_reply
+    is_directed_message = has_direct_mention or is_direct_reply or has_everyone_directive
     should_process = True
 
     strict_reply_targeting = bool(config.get("strict_reply_targeting", True))
-    if strict_reply_targeting and is_reply_to_other_bot and not has_direct_mention:
+    if strict_reply_targeting and is_reply_to_other_bot and not (has_direct_mention or has_everyone_directive):
         return
 
     direct_mention_retry_enabled = bool(config.get("direct_mention_retry_enabled", True))
@@ -1106,6 +1226,15 @@ async def on_message(new_msg: discord.Message) -> None:
                     logging.exception("Failed to roll back Redis source response count")
 
     final_text = apply_generated_mention_policy("".join(response_contents), config)
+    if response_msgs:
+        await maybe_send_curated_gif_reply(
+            trigger_msg=new_msg,
+            reply_target=response_msgs[-1],
+            curr_config=config,
+            redis_client_instance=redis_client_instance,
+            reference_text=final_text,
+        )
+
     for response_msg in response_msgs:
         msg_nodes[response_msg.id].text = final_text
         msg_nodes[response_msg.id].lock.release()

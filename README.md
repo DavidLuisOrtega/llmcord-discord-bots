@@ -134,6 +134,13 @@ Or run local models with:
 | **strict_reply_targeting** | When `true`, replies to another bot's message are ignored unless this bot is explicitly @mentioned. Prevents cross-bot hijacking of direct replies.<br /><br />Default: `true` |
 | **direct_mention_retry_enabled** | When `true`, direct @mentions/replies are retried after cooldowns instead of being dropped immediately.<br /><br />Default: `true` |
 | **direct_mention_max_wait_seconds** | Maximum total wait time for a directed message to clear cooldown gates before giving up.<br /><br />Default: `7200` |
+| **treat_everyone_as_directed** | When `true`, `@everyone` messages are treated like directed prompts for trigger logic while still respecting anti-dogpile pacing/caps.<br /><br />Default: `false` |
+| **gif_replies_enabled** | Enables optional curated GIF replies in-channel after normal bot text responses.<br /><br />Default: `false` |
+| **gif_reply_chance** | Probability (0-1) of sending a GIF reply when GIF mode is enabled.<br /><br />Default: `0.1` |
+| **gif_reply_cooldown_seconds** | Minimum delay between GIF replies in a channel.<br /><br />Default: `180` |
+| **gif_reply_max_per_hour_per_channel** | Maximum GIF replies allowed per channel per hour.<br /><br />Default: `4` |
+| **gif_reply_keyword_filters** | Optional list of lowercase keywords; when set, GIF replies only trigger if a keyword appears in the human prompt or bot response text.<br /><br />Default: `[]` |
+| **gif_reply_urls** | Curated list of GIF or GIF-page URLs. The bot fetches and uploads the resolved image so Discord renders media instead of bare links. Leave empty to disable GIF output even if enabled.<br /><br />Default: example list |
 | **use_plain_responses** | When set to `true` the bot will use plaintext responses instead of embeds. Plaintext responses have a shorter character limit so the bot's messages may split more often.<br /><br />Default: `false`<br /><br />**Also disables streamed responses and warning messages.** |
 | **allow_dms** | Set to `false` to disable direct message access.<br /><br />Default: `true` |
 | **permissions** | Configure access permissions for `users`, `roles` and `channels`, each with a list of `allowed_ids` and `blocked_ids`.<br /><br />Control which `users` are admins with `admin_ids`. Admins can change the model with `/model` and DM the bot even if `allow_dms` is `false`.<br /><br />**Leave `allowed_ids` empty to allow ALL in that category.**<br /><br />**Role and channel permissions do not affect DMs.**<br /><br />**You can use [category](https://support.discord.com/hc/en-us/articles/115001580171-Channel-Categories-101) IDs to control channel permissions in groups.** |
