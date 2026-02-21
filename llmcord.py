@@ -700,11 +700,15 @@ async def on_message(new_msg: discord.Message) -> None:
     parent_msg = await get_reply_parent_message() if not is_dm else None
     is_direct_reply = bool(parent_msg and discord_bot.user and parent_msg.author.id == discord_bot.user.id)
     is_reply_to_other_bot = bool(parent_msg and parent_msg.author.bot and discord_bot.user and parent_msg.author.id != discord_bot.user.id)
+    is_directed_message = has_direct_mention or is_direct_reply
     should_process = True
 
     strict_reply_targeting = bool(config.get("strict_reply_targeting", True))
     if strict_reply_targeting and is_reply_to_other_bot and not has_direct_mention:
         return
+
+    direct_mention_retry_enabled = bool(config.get("direct_mention_retry_enabled", True))
+    remaining_direct_wait_seconds = max(float(config.get("direct_mention_max_wait_seconds", 7200) or 0), 0) if is_directed_message else 0
 
     if not is_dm:
         autonomous_bot_only_mode = config.get("autonomous_bot_only_mode", False)
@@ -783,33 +787,63 @@ async def on_message(new_msg: discord.Message) -> None:
     global_channel_cooldown_seconds = max(float(config.get("global_channel_cooldown_seconds", 0) or 0), 0)
     global_channel_arbitration_jitter_seconds = max(float(config.get("global_channel_arbitration_jitter_seconds", 0) or 0), 0)
     if not is_dm and (global_channel_cooldown_seconds > 0 or global_channel_arbitration_jitter_seconds > 0):
-        if global_channel_arbitration_jitter_seconds > 0:
-            await asyncio.sleep(random.uniform(0, global_channel_arbitration_jitter_seconds))
+        while True:
+            if global_channel_arbitration_jitter_seconds > 0:
+                await asyncio.sleep(random.uniform(0, global_channel_arbitration_jitter_seconds))
 
-        try:
-            recent_channel_msgs = [m async for m in new_msg.channel.history(limit=25)]
-        except (discord.NotFound, discord.HTTPException):
-            recent_channel_msgs = []
+            try:
+                recent_channel_msgs = [m async for m in new_msg.channel.history(limit=25)]
+            except (discord.NotFound, discord.HTTPException):
+                recent_channel_msgs = []
 
-        latest_channel_msg = recent_channel_msgs[0] if recent_channel_msgs else None
-        # If another bot has already replied after this trigger message, back off.
-        if latest_channel_msg and latest_channel_msg.id != new_msg.id and latest_channel_msg.author.bot and latest_channel_msg.created_at > new_msg.created_at:
-            return
-
-        if global_channel_cooldown_seconds > 0:
-            latest_bot_msg = next((m for m in recent_channel_msgs if m.author.bot and m.id != new_msg.id), None)
-            if latest_bot_msg and (discord.utils.utcnow() - latest_bot_msg.created_at).total_seconds() < global_channel_cooldown_seconds:
+            latest_channel_msg = recent_channel_msgs[0] if recent_channel_msgs else None
+            # If another bot has already replied after this trigger message, back off.
+            if latest_channel_msg and latest_channel_msg.id != new_msg.id and latest_channel_msg.author.bot and latest_channel_msg.created_at > new_msg.created_at:
                 return
+
+            wait_seconds = 0.0
+            if global_channel_cooldown_seconds > 0:
+                latest_bot_msg = next((m for m in recent_channel_msgs if m.author.bot and m.id != new_msg.id), None)
+                if latest_bot_msg:
+                    age_seconds = (discord.utils.utcnow() - latest_bot_msg.created_at).total_seconds()
+                    if age_seconds < global_channel_cooldown_seconds:
+                        wait_seconds = global_channel_cooldown_seconds - age_seconds
+
+            if wait_seconds <= 0:
+                break
+
+            if is_directed_message and direct_mention_retry_enabled and remaining_direct_wait_seconds > 0:
+                sleep_for = min(wait_seconds, remaining_direct_wait_seconds)
+                await asyncio.sleep(max(sleep_for, 0))
+                remaining_direct_wait_seconds = max(0.0, remaining_direct_wait_seconds - sleep_for)
+                if remaining_direct_wait_seconds <= 0:
+                    return
+                continue
+
+            return
 
     response_cooldown_seconds = max(float(config.get("response_cooldown_seconds", 0) or 0), 0)
     response_cooldown_jitter_seconds = max(float(config.get("response_cooldown_jitter_seconds", 0) or 0), 0)
     if response_cooldown_seconds > 0 or response_cooldown_jitter_seconds > 0:
         channel_id = new_msg.channel.id
-        curr_time = monotonic()
-        async with cooldown_lock:
-            if curr_time < next_response_time_by_channel.get(channel_id, 0):
-                return
-            next_response_time_by_channel[channel_id] = curr_time + response_cooldown_seconds + random.uniform(0, response_cooldown_jitter_seconds)
+        while True:
+            curr_time = monotonic()
+            async with cooldown_lock:
+                next_available_time = next_response_time_by_channel.get(channel_id, 0)
+                if curr_time >= next_available_time:
+                    next_response_time_by_channel[channel_id] = curr_time + response_cooldown_seconds + random.uniform(0, response_cooldown_jitter_seconds)
+                    break
+                wait_seconds = next_available_time - curr_time
+
+            if is_directed_message and direct_mention_retry_enabled and remaining_direct_wait_seconds > 0:
+                sleep_for = min(wait_seconds, remaining_direct_wait_seconds)
+                await asyncio.sleep(max(sleep_for, 0))
+                remaining_direct_wait_seconds = max(0.0, remaining_direct_wait_seconds - sleep_for)
+                if remaining_direct_wait_seconds <= 0:
+                    return
+                continue
+
+            return
 
     redis_claim_state = None
     if not is_dm:
@@ -823,8 +857,6 @@ async def on_message(new_msg: discord.Message) -> None:
             source_message_window_seconds = max(int(float(config.get("source_message_window_seconds", 180) or 180)), 30)
             max_responses_per_source_message = max(int(float(config.get("max_responses_per_source_message", 2) or 2)), 1)
             followup_response_chance = clamp_01(float(config.get("followup_response_chance", 0.15) or 0.15))
-            is_directed_message = has_direct_mention or is_direct_reply
-
             floor_lock_key = f"llmcord:floor:{channel_id}:{source_message_id}"
             source_count_key = f"llmcord:source_count:{channel_id}:{source_message_id}"
             active_responder_key = f"llmcord:active_responder:{channel_id}"
@@ -837,7 +869,7 @@ async def on_message(new_msg: discord.Message) -> None:
             if response_index == 1:
                 await redis_client_instance.expire(source_count_key, source_message_window_seconds)
 
-            if response_index > max_responses_per_source_message:
+            if response_index > max_responses_per_source_message and not is_directed_message:
                 await redis_client_instance.decr(source_count_key)
                 return
 
@@ -847,8 +879,10 @@ async def on_message(new_msg: discord.Message) -> None:
 
             claimed_active = await redis_client_instance.set(active_responder_key, bot_identity, ex=active_responder_ttl_seconds, nx=True)
             if not claimed_active:
-                await redis_client_instance.decr(source_count_key)
-                return
+                if not (is_directed_message and direct_mention_retry_enabled):
+                    await redis_client_instance.decr(source_count_key)
+                    return
+                active_responder_key = None
 
             redis_claim_state = dict(
                 client=redis_client_instance,
@@ -1058,11 +1092,12 @@ async def on_message(new_msg: discord.Message) -> None:
             source_count_key = redis_claim_state["source_count_key"]
             bot_identity = redis_claim_state["bot_identity"]
             # Release the typing floor only if we still own it.
-            try:
-                if await redis_client_instance.get(active_responder_key) == bot_identity:
-                    await redis_client_instance.delete(active_responder_key)
-            except RedisError:
-                logging.exception("Failed to release Redis active responder key")
+            if active_responder_key is not None:
+                try:
+                    if await redis_client_instance.get(active_responder_key) == bot_identity:
+                        await redis_client_instance.delete(active_responder_key)
+                except RedisError:
+                    logging.exception("Failed to release Redis active responder key")
             # If generation produced no messages, roll back this reserved response slot.
             if response_msgs == []:
                 try:

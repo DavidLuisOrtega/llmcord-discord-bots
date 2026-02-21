@@ -61,6 +61,8 @@ afk_followup_templates:
   - "whenever you're free, curious what you think."
 generated_user_mentions_mode: "question_only"  # always | question_only | never
 strict_reply_targeting: true
+direct_mention_retry_enabled: true
+direct_mention_max_wait_seconds: 7200
 
 use_plain_responses: false
 allow_dms: true
