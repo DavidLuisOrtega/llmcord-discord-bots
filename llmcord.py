@@ -899,6 +899,7 @@ async def on_message(new_msg: discord.Message) -> None:
         return
 
     has_direct_mention = bool(discord_bot.user and discord_bot.user in new_msg.mentions)
+    mentions_any_bot = any(getattr(mentioned_user, "bot", False) for mentioned_user in new_msg.mentions)
     treat_everyone_as_directed = bool(config.get("treat_everyone_as_directed", False))
     has_everyone_directive = bool(getattr(new_msg, "mention_everyone", False) and treat_everyone_as_directed)
 
@@ -925,6 +926,7 @@ async def on_message(new_msg: discord.Message) -> None:
         return
 
     direct_mention_retry_enabled = bool(config.get("direct_mention_retry_enabled", True))
+    direct_mention_fast_lane_enabled = bool(config.get("direct_mention_fast_lane_enabled", True))
     remaining_direct_wait_seconds = max(float(config.get("direct_mention_max_wait_seconds", 7200) or 0), 0) if is_directed_message else 0
 
     if not is_dm:
@@ -936,6 +938,9 @@ async def on_message(new_msg: discord.Message) -> None:
             # Explicit @mentions/replies should always trigger in autonomous channels.
             if has_direct_mention or is_direct_reply:
                 should_process = True
+            elif mentions_any_bot:
+                # If another bot is explicitly mentioned, don't probabilistically jump in.
+                should_process = False
             else:
                 # Otherwise, use per-bot probabilistic participation to avoid dogpiles.
                 group_response_chance = clamp_01(float(config.get("group_response_chance", 1.0) or 1.0))
@@ -1003,7 +1008,7 @@ async def on_message(new_msg: discord.Message) -> None:
 
     global_channel_cooldown_seconds = max(float(config.get("global_channel_cooldown_seconds", 0) or 0), 0)
     global_channel_arbitration_jitter_seconds = max(float(config.get("global_channel_arbitration_jitter_seconds", 0) or 0), 0)
-    if not is_dm and (global_channel_cooldown_seconds > 0 or global_channel_arbitration_jitter_seconds > 0):
+    if not is_dm and not (is_directed_message and direct_mention_fast_lane_enabled) and (global_channel_cooldown_seconds > 0 or global_channel_arbitration_jitter_seconds > 0):
         while True:
             if global_channel_arbitration_jitter_seconds > 0:
                 await asyncio.sleep(random.uniform(0, global_channel_arbitration_jitter_seconds))
@@ -1041,7 +1046,7 @@ async def on_message(new_msg: discord.Message) -> None:
 
     response_cooldown_seconds = max(float(config.get("response_cooldown_seconds", 0) or 0), 0)
     response_cooldown_jitter_seconds = max(float(config.get("response_cooldown_jitter_seconds", 0) or 0), 0)
-    if response_cooldown_seconds > 0 or response_cooldown_jitter_seconds > 0:
+    if not (is_directed_message and direct_mention_fast_lane_enabled) and (response_cooldown_seconds > 0 or response_cooldown_jitter_seconds > 0):
         channel_id = new_msg.channel.id
         while True:
             curr_time = monotonic()

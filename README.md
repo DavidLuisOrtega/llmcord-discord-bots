@@ -135,7 +135,8 @@ Or run local models with:
 | **generated_user_mentions_mode** | Mention policy for generated replies: `always`, `question_only`, or `never`. `question_only` strips user mentions unless the message is phrased as a question.<br /><br />Default: `question_only` |
 | **strict_reply_targeting** | When `true`, replies to another bot's message are ignored unless this bot is explicitly @mentioned. Prevents cross-bot hijacking of direct replies.<br /><br />Default: `true` |
 | **direct_mention_retry_enabled** | When `true`, direct @mentions/replies are retried after cooldowns instead of being dropped immediately.<br /><br />Default: `true` |
-| **direct_mention_max_wait_seconds** | Maximum total wait time for a directed message to clear cooldown gates before giving up.<br /><br />Default: `7200` |
+| **direct_mention_fast_lane_enabled** | When `true`, direct @mentions/replies bypass normal cooldown gates for faster response handling.<br /><br />Default: `true` |
+| **direct_mention_max_wait_seconds** | Maximum total wait time for a directed message to clear retryable gates before giving up.<br /><br />Default: `180` |
 | **treat_everyone_as_directed** | When `true`, `@everyone` messages are treated like directed prompts for trigger logic while still respecting anti-dogpile pacing/caps.<br /><br />Default: `false` |
 | **gif_replies_enabled** | Enables optional curated GIF replies in-channel after normal bot text responses.<br /><br />Default: `false` |
 | **gif_reply_chance** | Probability (0-1) of sending a GIF reply when GIF mode is enabled.<br /><br />Default: `0.1` |
