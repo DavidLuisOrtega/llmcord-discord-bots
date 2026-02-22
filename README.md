@@ -107,6 +107,9 @@ Or run local models with:
 | **afk_second_followup_jitter_seconds** | Random +/- jitter applied to the second AFK follow-up delay for each source message.<br /><br />Default: `0` |
 | **afk_max_followups_per_message** | Maximum AFK follow-ups per source human message.<br /><br />Default: `2` |
 | **afk_followup_chance** | Probability (0-1) each AFK follow-up attempt actually sends (adds natural randomness).<br /><br />Default: `0.5` |
+| **afk_followup_generation_retries** | Number of model-generation attempts for AFK follow-up text before fallback text is used.<br /><br />Default: `2` |
+| **afk_followup_max_chars** | Maximum characters for generated AFK follow-up text.<br /><br />Default: `140` |
+| **afk_followup_fallback_text** | Fallback AFK follow-up text when generation fails.<br /><br />Default: `no rush...` |
 | **afk_cancel_on_any_human_message** | Cancel pending AFK follow-ups if any newer human message arrives in that channel.<br /><br />Default: `true` |
 | **afk_scheduler_poll_seconds** | How often each bot checks Redis for due AFK follow-up jobs.<br /><br />Default: `5` |
 | **quiet_hours_enabled** | Suppresses AFK follow-up sending during quiet hours (jobs are deferred, not dropped).<br /><br />Default: `false` |
@@ -129,7 +132,6 @@ Or run local models with:
 | **proactive_mention_chance** | Probability (0-1) a proactive starter attempt uses a targeted @mention format.<br /><br />Default: `0.5` |
 | **proactive_mention_recent_user_seconds** | How far back to consider users as "recently active" for proactive @mentions.<br /><br />Default: `172800` (48 hours) |
 | **proactive_mention_max_per_user_per_day** | Per-user daily cap for proactive in-channel @mentions.<br /><br />Default: `1` |
-| **afk_followup_templates** | Candidate short follow-up lines used when AFK reminders trigger.<br /><br />Default: two generic templates |
 | **generated_user_mentions_mode** | Mention policy for generated replies: `always`, `question_only`, or `never`. `question_only` strips user mentions unless the message is phrased as a question.<br /><br />Default: `question_only` |
 | **strict_reply_targeting** | When `true`, replies to another bot's message are ignored unless this bot is explicitly @mentioned. Prevents cross-bot hijacking of direct replies.<br /><br />Default: `true` |
 | **direct_mention_retry_enabled** | When `true`, direct @mentions/replies are retried after cooldowns instead of being dropped immediately.<br /><br />Default: `true` |

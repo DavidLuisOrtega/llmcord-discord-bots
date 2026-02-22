@@ -34,6 +34,9 @@ afk_second_followup_seconds: 3600
 afk_second_followup_jitter_seconds: 0
 afk_max_followups_per_message: 2
 afk_followup_chance: 0.5
+afk_followup_generation_retries: 2
+afk_followup_max_chars: 140
+afk_followup_fallback_text: "no rush. drop your thoughts when you're back."
 afk_cancel_on_any_human_message: true
 afk_scheduler_poll_seconds: 5
 quiet_hours_enabled: false
@@ -56,9 +59,6 @@ proactive_mention_enabled: false
 proactive_mention_chance: 0.5
 proactive_mention_recent_user_seconds: 172800
 proactive_mention_max_per_user_per_day: 1
-afk_followup_templates:
-  - "no rush. drop your thoughts when you're back."
-  - "whenever you're free, curious what you think."
 generated_user_mentions_mode: "question_only"  # always | question_only | never
 strict_reply_targeting: true
 direct_mention_retry_enabled: true

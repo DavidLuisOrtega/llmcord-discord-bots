@@ -404,6 +404,59 @@ async def generate_proactive_starter_text(curr_config: dict[str, Any], target_us
     return content
 
 
+async def generate_afk_followup_text(curr_config: dict[str, Any], max_chars: int) -> str:
+    provider_slash_model = curr_model
+    provider, model = provider_slash_model.removesuffix(":vision").split("/", 1)
+    provider_config = curr_config["providers"][provider]
+    openai_client = AsyncOpenAI(base_url=provider_config["base_url"], api_key=provider_config.get("api_key", "sk-no-key-required"))
+
+    model_parameters = curr_config["models"].get(provider_slash_model, None)
+    extra_headers = provider_config.get("extra_headers")
+    extra_query = provider_config.get("extra_query")
+    extra_body = (provider_config.get("extra_body") or {}) | (model_parameters or {}) or None
+
+    accept_usernames = any(provider_slash_model.lower().startswith(x) for x in PROVIDERS_SUPPORTING_USERNAMES)
+    system_prompt = build_system_prompt_for_model(curr_config, accept_usernames)
+
+    user_instruction = (
+        "Write exactly one short, natural follow-up Discord reply for a conversation that has gone quiet. "
+        f"Keep it under {max_chars} characters, one sentence, low-pressure, and conversational. "
+        "Do not include user mentions, no lists, no markdown, no hashtags, and no @everyone/@here."
+    )
+
+    messages: list[dict[str, str]] = [dict(role="user", content=user_instruction)]
+    if system_prompt:
+        messages.append(dict(role="system", content=system_prompt))
+
+    try:
+        response = await openai_client.chat.completions.create(
+            model=model,
+            messages=messages[::-1],
+            stream=False,
+            extra_headers=extra_headers,
+            extra_query=extra_query,
+            extra_body=extra_body,
+        )
+    except Exception:
+        logging.exception("Error generating AFK follow-up text")
+        return ""
+
+    content = ""
+    if response.choices:
+        message_content = response.choices[0].message.content
+        if isinstance(message_content, str):
+            content = message_content
+        elif isinstance(message_content, list):
+            content = "".join(
+                part.get("text", "")
+                for part in message_content
+                if isinstance(part, dict)
+            )
+
+    content = sanitize_proactive_message(content, max_chars=max_chars, target_user_id=None)
+    return content
+
+
 async def maybe_send_proactive_starter(curr_config: dict[str, Any], redis_client_instance, channel_id: int) -> None:
     if not curr_config.get("proactive_starters_enabled", False):
         return
@@ -652,11 +705,21 @@ async def process_afk_followup_item(item_id: str, curr_config: dict[str, Any], r
         await redis_client_instance.delete(item_hash_key)
         return
 
-    followup_templates = curr_config.get("afk_followup_templates") or [
-        "no rush. drop your thoughts when you're back.",
-        "whenever you're free, curious what you think.",
-    ]
-    followup_text = random.choice(followup_templates)
+    afk_followup_retries = max(int(float(curr_config.get("afk_followup_generation_retries", 2) or 2)), 1)
+    afk_followup_max_chars = max(int(float(curr_config.get("afk_followup_max_chars", 140) or 140)), 40)
+    followup_text = ""
+    for _ in range(afk_followup_retries):
+        followup_text = await generate_afk_followup_text(curr_config, max_chars=afk_followup_max_chars)
+        if followup_text != "":
+            break
+    if followup_text == "":
+        followup_text = str(
+            curr_config.get("afk_followup_fallback_text", "no rush. drop your thoughts when you're back.") or ""
+        ).strip()[:afk_followup_max_chars]
+    if followup_text == "":
+        await redis_client_instance.zrem(schedule_zset_key, item_id)
+        await redis_client_instance.delete(item_hash_key)
+        return
 
     try:
         await source_msg.reply(followup_text, silent=True)
