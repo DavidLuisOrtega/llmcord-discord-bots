@@ -168,12 +168,46 @@ def apply_generated_mention_policy(content: str, curr_config: dict[str, Any]) ->
     return cleaned
 
 
+def pick_mood(curr_config: dict[str, Any], now: datetime) -> Optional[str]:
+    if not curr_config.get("mood_injector_enabled", False):
+        return None
+
+    mood_pool = [str(mood).strip() for mood in (curr_config.get("mood_pool") or []) if str(mood).strip()]
+    if mood_pool == []:
+        return None
+
+    rotation_mode = str(curr_config.get("mood_rotation_mode", "daily") or "daily").lower().strip()
+    if rotation_mode == "per_message":
+        return random.choice(mood_pool)
+
+    if rotation_mode == "hourly":
+        bucket_key = now.strftime("%Y-%m-%d-%H")
+    else:
+        bucket_key = now.strftime("%Y-%m-%d")
+
+    stable_seed = f"{get_bot_identity()}::{bucket_key}"
+    seed_int = int(sha256(stable_seed.encode("utf-8")).hexdigest(), 16)
+    return mood_pool[seed_int % len(mood_pool)]
+
+
 def build_system_prompt_for_model(curr_config: dict[str, Any], accept_usernames: bool) -> Optional[str]:
     if not (system_prompt := curr_config.get("system_prompt")):
         return None
 
     now = datetime.now().astimezone()
     system_prompt = system_prompt.replace("{date}", now.strftime("%B %d %Y")).replace("{time}", now.strftime("%H:%M:%S %Z%z")).strip()
+
+    mood = pick_mood(curr_config, now)
+    if mood is not None:
+        mood_strength = str(curr_config.get("mood_influence_strength", "subtle") or "subtle").lower().strip()
+        if mood_strength == "strong":
+            mood_line = f"CURRENT VIBE: You are {mood}. Let this clearly shape your tone and how intensely you engage."
+        elif mood_strength == "medium":
+            mood_line = f"CURRENT VIBE: You are {mood}. Let this influence your tone and pacing in a noticeable but natural way."
+        else:
+            mood_line = f"CURRENT VIBE: You are {mood}. Let this subtly influence your tone and how much you care in this moment."
+        system_prompt += f"\n\n{mood_line}"
+
     if accept_usernames:
         system_prompt += "\n\nUser identifiers are Discord IDs. Prefer normal feed-style replies; only use '<@ID>' when directly addressing a specific person."
     return system_prompt
