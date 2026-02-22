@@ -163,8 +163,20 @@ def apply_generated_mention_policy(content: str, curr_config: dict[str, Any]) ->
     elif mentions_mode == "question_only" and "?" not in cleaned:
         cleaned = MENTION_TOKEN_REGEX.sub("", cleaned)
 
-    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
-    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    cleaned = re.sub(r"^\s*(?:[-*•]+|\d+[.)])\s+", "", cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r"\n+", " ", cleaned)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip()
+
+    if curr_config.get("discord_chat_style_enabled", True):
+        max_sentences = max(int(curr_config.get("discord_chat_max_sentences", 2) or 2), 1)
+        sentence_parts = [part.strip() for part in re.split(r"(?<=[.!?])\s+", cleaned) if part.strip()]
+        if sentence_parts:
+            cleaned = " ".join(sentence_parts[:max_sentences]).strip()
+
+        style_max_chars = max(int(curr_config.get("discord_chat_style_max_chars", 220) or 0), 0)
+        if style_max_chars > 0 and len(cleaned) > style_max_chars:
+            cleaned = cleaned[:style_max_chars].rstrip()
+
     return cleaned
 
 
@@ -207,6 +219,15 @@ def build_system_prompt_for_model(curr_config: dict[str, Any], accept_usernames:
         else:
             mood_line = f"CURRENT VIBE: You are {mood}. Let this subtly influence your tone and how much you care in this moment."
         system_prompt += f"\n\n{mood_line}"
+
+    if curr_config.get("discord_chat_global_style_prompt_enabled", True):
+        system_prompt += (
+            "\n\nGLOBAL CHAT STYLE: You're chatting on Discord."
+            " Avoid bullet points/numbered lists and long paragraphs."
+            " Keep replies terse, playful, and conversational, usually 1-2 short sentences."
+            " lowercase and imperfect punctuation are fine."
+            " If asked for depth, give a short take first and expand only if asked."
+        )
 
     if accept_usernames:
         system_prompt += "\n\nUser identifiers are Discord IDs. Prefer normal feed-style replies; only use '<@ID>' when directly addressing a specific person."

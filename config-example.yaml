@@ -87,6 +87,10 @@ mood_pool:
   - "tired and only interested in short replies"
   - "weirdly obsessed with 90s nostalgia today"
   - "in a surprisingly helpful mood"
+discord_chat_global_style_prompt_enabled: true
+discord_chat_style_enabled: true
+discord_chat_max_sentences: 2
+discord_chat_style_max_chars: 220
 
 use_plain_responses: false
 allow_dms: true

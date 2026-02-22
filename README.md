@@ -151,6 +151,10 @@ Or run local models with:
 | **mood_rotation_mode** | Mood rotation cadence: `daily`, `hourly`, or `per_message`.<br /><br />Default: `daily` |
 | **mood_influence_strength** | How strongly mood affects tone: `subtle`, `medium`, `strong`.<br /><br />Default: `subtle` |
 | **mood_pool** | List of mood strings available for injection when mood mode is enabled.<br /><br />Default: included example list |
+| **discord_chat_global_style_prompt_enabled** | Appends a global Discord-style behavior rule to the system prompt (short, playful, no list-heavy formatting).<br /><br />Default: `true` |
+| **discord_chat_style_enabled** | Enables output post-processing to flatten bullets/lists and keep replies chat-like.<br /><br />Default: `true` |
+| **discord_chat_max_sentences** | Maximum sentence count kept after chat-style post-processing.<br /><br />Default: `2` |
+| **discord_chat_style_max_chars** | Character cap applied by chat-style post-processing (set `0` to disable this cap).<br /><br />Default: `220` |
 | **use_plain_responses** | When set to `true` the bot will use plaintext responses instead of embeds. Plaintext responses have a shorter character limit so the bot's messages may split more often.<br /><br />Default: `false`<br /><br />**Also disables streamed responses and warning messages.** |
 | **allow_dms** | Set to `false` to disable direct message access.<br /><br />Default: `true` |
 | **permissions** | Configure access permissions for `users`, `roles` and `channels`, each with a list of `allowed_ids` and `blocked_ids`.<br /><br />Control which `users` are admins with `admin_ids`. Admins can change the model with `/model` and DM the bot even if `allow_dms` is `false`.<br /><br />**Leave `allowed_ids` empty to allow ALL in that category.**<br /><br />**Role and channel permissions do not affect DMs.**<br /><br />**You can use [category](https://support.discord.com/hc/en-us/articles/115001580171-Channel-Categories-101) IDs to control channel permissions in groups.** |
