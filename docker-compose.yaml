@@ -4,57 +4,57 @@ services:
     network_mode: host
     restart: unless-stopped
 
-  bot_advocate:
+  bot_kevin:
     build: .
     network_mode: host
     restart: unless-stopped
     depends_on:
       - redis
     environment:
-      CONFIG_FILE: config_advocate.yaml
+      CONFIG_FILE: config_kevin.yaml
     volumes:
       - ./:/app:ro
 
-  bot_architect:
+  bot_saul:
     build: .
     network_mode: host
     restart: unless-stopped
     depends_on:
       - redis
     environment:
-      CONFIG_FILE: config_architect.yaml
+      CONFIG_FILE: config_saul.yaml
     volumes:
       - ./:/app:ro
 
-  bot_coder:
+  bot_katherine:
     build: .
     network_mode: host
     restart: unless-stopped
     depends_on:
       - redis
     environment:
-      CONFIG_FILE: config_coder.yaml
+      CONFIG_FILE: config_katherine.yaml
     volumes:
       - ./:/app:ro
 
-  bot_creative:
+  bot_damon:
     build: .
     network_mode: host
     restart: unless-stopped
     depends_on:
       - redis
     environment:
-      CONFIG_FILE: config_creative.yaml
+      CONFIG_FILE: config_damon.yaml
     volumes:
       - ./:/app:ro
 
-  bot_security:
+  bot_sarah:
     build: .
     network_mode: host
     restart: unless-stopped
     depends_on:
       - redis
     environment:
-      CONFIG_FILE: config_security.yaml
+      CONFIG_FILE: config_sarah.yaml
     volumes:
       - ./:/app:ro

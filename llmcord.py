@@ -253,6 +253,79 @@ def sanitize_proactive_message(raw_text: str, max_chars: int, target_user_id: Op
     return text
 
 
+def extract_context_tokens(text: str) -> set[str]:
+    if not text:
+        return set()
+    return set(re.findall(r"[a-z0-9']{3,}", text.lower()))
+
+
+def rank_contextual_gif_urls(curr_config: dict[str, Any], trigger_text: str, reference_text: str) -> list[str]:
+    combined_text = f"{trigger_text}\n{reference_text}".strip()
+    context_tokens = extract_context_tokens(combined_text)
+
+    catalog_entries = curr_config.get("gif_catalog") or []
+    ranked: list[tuple[float, str]] = []
+
+    for entry in catalog_entries:
+        if not isinstance(entry, dict):
+            continue
+        url = str(entry.get("url", "")).strip()
+        if not url:
+            continue
+
+        tags = entry.get("tags") or []
+        tag_tokens = {str(tag).lower().strip() for tag in tags if str(tag).strip()}
+        overlap = len(context_tokens & tag_tokens) if context_tokens and tag_tokens else 0
+        # Slight randomness keeps repeated contexts from always selecting same GIF.
+        score = float(overlap) + random.random() * 0.05
+        ranked.append((score, url))
+
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    ranked_urls = [url for score, url in ranked if score > 0]
+
+    fallback_urls = [str(url).strip() for url in (curr_config.get("gif_reply_urls") or []) if str(url).strip()]
+    # Append fallbacks (and non-overlap catalog URLs) while preserving order and uniqueness.
+    for _, url in ranked:
+        if url not in ranked_urls:
+            ranked_urls.append(url)
+    for url in fallback_urls:
+        if url not in ranked_urls:
+            ranked_urls.append(url)
+    return ranked_urls
+
+
+def rank_contextual_emojis(curr_config: dict[str, Any], trigger_text: str, reference_text: str) -> list[str]:
+    combined_text = f"{trigger_text}\n{reference_text}".strip()
+    context_tokens = extract_context_tokens(combined_text)
+
+    catalog_entries = curr_config.get("emoji_reaction_catalog") or []
+    ranked: list[tuple[float, str]] = []
+
+    for entry in catalog_entries:
+        if not isinstance(entry, dict):
+            continue
+        emoji = str(entry.get("emoji", "")).strip()
+        if not emoji:
+            continue
+        tags = entry.get("tags") or []
+        tag_tokens = {str(tag).lower().strip() for tag in tags if str(tag).strip()}
+        overlap = len(context_tokens & tag_tokens) if context_tokens and tag_tokens else 0
+        score = float(overlap) + random.random() * 0.05
+        ranked.append((score, emoji))
+
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    ranked_emojis = [emoji for score, emoji in ranked if score > 0]
+
+    fallback_emojis = [str(emoji).strip() for emoji in (curr_config.get("emoji_reaction_choices") or []) if str(emoji).strip()]
+    for _, emoji in ranked:
+        if emoji not in ranked_emojis:
+            ranked_emojis.append(emoji)
+    for emoji in fallback_emojis:
+        if emoji not in ranked_emojis:
+            ranked_emojis.append(emoji)
+    return ranked_emojis
+
+
 async def fetch_image_asset_from_url(url: str) -> Optional[tuple[bytes, str]]:
     try:
         response = await httpx_client.get(url, follow_redirects=True, timeout=20)
@@ -293,7 +366,11 @@ async def maybe_send_curated_gif_reply(
     if not curr_config.get("gif_replies_enabled", False):
         return
 
-    gif_urls = [str(url).strip() for url in (curr_config.get("gif_reply_urls") or []) if str(url).strip()]
+    contextual_selection_enabled = bool(curr_config.get("gif_contextual_selection_enabled", False))
+    if contextual_selection_enabled:
+        gif_urls = rank_contextual_gif_urls(curr_config, trigger_msg.content, reference_text)
+    else:
+        gif_urls = [str(url).strip() for url in (curr_config.get("gif_reply_urls") or []) if str(url).strip()]
     if gif_urls == []:
         return
 
@@ -309,8 +386,12 @@ async def maybe_send_curated_gif_reply(
 
     gif_reply_cooldown_seconds = max(int(float(curr_config.get("gif_reply_cooldown_seconds", 180) or 180)), 0)
     gif_reply_max_per_hour_per_channel = max(int(float(curr_config.get("gif_reply_max_per_hour_per_channel", 4) or 4)), 0)
+    gif_recent_dedupe_window_seconds = max(int(float(curr_config.get("gif_recent_dedupe_window_seconds", 21600) or 21600)), 0)
+    gif_bad_url_cooldown_seconds = max(int(float(curr_config.get("gif_bad_url_cooldown_seconds", 86400) or 86400)), 0)
+    gif_bad_url_max_failures = max(int(float(curr_config.get("gif_bad_url_max_failures", 2) or 2)), 1)
     now = now_ts()
     channel_id = trigger_msg.channel.id
+    recent_gif_zset_key = f"llmcord:gif:recent_urls:{channel_id}"
 
     if redis_client_instance is not None:
         last_gif_ts_key = f"llmcord:gif:last_ts:{channel_id}"
@@ -326,13 +407,48 @@ async def maybe_send_curated_gif_reply(
             if hour_count >= gif_reply_max_per_hour_per_channel:
                 return
 
+        if gif_recent_dedupe_window_seconds > 0:
+            await redis_client_instance.zremrangebyscore(
+                recent_gif_zset_key,
+                min=0,
+                max=now - gif_recent_dedupe_window_seconds,
+            )
+            recent_urls = set(await redis_client_instance.zrange(recent_gif_zset_key, 0, -1))
+            gif_urls = [url for url in gif_urls if url not in recent_urls]
+            if gif_urls == []:
+                return
+
+        if gif_bad_url_cooldown_seconds > 0:
+            healthy_urls = []
+            for url in gif_urls:
+                url_hash = sha256(url.encode("utf-8")).hexdigest()
+                bad_key = f"llmcord:gif:bad_url:{channel_id}:{url_hash}"
+                if not await redis_client_instance.exists(bad_key):
+                    healthy_urls.append(url)
+            if healthy_urls:
+                gif_urls = healthy_urls
+
     gif_payload = None
     randomized_urls = gif_urls[:]
     random.shuffle(randomized_urls)
     for candidate_url in randomized_urls:
         gif_payload = await fetch_image_asset_from_url(candidate_url)
         if gif_payload is not None:
+            if redis_client_instance is not None:
+                url_hash = sha256(candidate_url.encode("utf-8")).hexdigest()
+                await redis_client_instance.delete(
+                    f"llmcord:gif:fail_count:{channel_id}:{url_hash}",
+                    f"llmcord:gif:bad_url:{channel_id}:{url_hash}",
+                )
             break
+        if redis_client_instance is not None:
+            url_hash = sha256(candidate_url.encode("utf-8")).hexdigest()
+            fail_key = f"llmcord:gif:fail_count:{channel_id}:{url_hash}"
+            fail_count = int(await redis_client_instance.incr(fail_key))
+            await redis_client_instance.expire(fail_key, 7 * 24 * 3600)
+            if fail_count >= gif_bad_url_max_failures and gif_bad_url_cooldown_seconds > 0:
+                bad_key = f"llmcord:gif:bad_url:{channel_id}:{url_hash}"
+                await redis_client_instance.set(bad_key, "1", ex=gif_bad_url_cooldown_seconds)
 
     if gif_payload is None:
         return
@@ -359,6 +475,91 @@ async def maybe_send_curated_gif_reply(
         await redis_client_instance.set(f"llmcord:gif:last_ts:{channel_id}", now, ex=max(gif_reply_cooldown_seconds, 3600))
         hour_bucket = int(now // 3600)
         per_hour_key = f"llmcord:gif:hour_count:{channel_id}:{hour_bucket}"
+        hour_count = await redis_client_instance.incr(per_hour_key)
+        if hour_count == 1:
+            await redis_client_instance.expire(per_hour_key, 2 * 3600)
+        if gif_recent_dedupe_window_seconds > 0:
+            await redis_client_instance.zadd(recent_gif_zset_key, {candidate_url: now})
+            await redis_client_instance.expire(recent_gif_zset_key, gif_recent_dedupe_window_seconds + 24 * 3600)
+
+
+async def maybe_add_emoji_reaction(
+    trigger_msg: discord.Message,
+    curr_config: dict[str, Any],
+    redis_client_instance,
+    reference_text: str,
+) -> None:
+    if trigger_msg.channel.type == discord.ChannelType.private:
+        return
+    if not curr_config.get("emoji_reactions_enabled", False):
+        return
+
+    contextual_selection_enabled = bool(curr_config.get("emoji_reaction_contextual_selection_enabled", True))
+    if contextual_selection_enabled:
+        emoji_choices = rank_contextual_emojis(curr_config, trigger_msg.content, reference_text)
+    else:
+        emoji_choices = [str(emoji).strip() for emoji in (curr_config.get("emoji_reaction_choices") or []) if str(emoji).strip()]
+    if emoji_choices == []:
+        return
+
+    reaction_chance = clamp_01(float(curr_config.get("emoji_reaction_chance", 0.15) or 0.15))
+    if random.random() > reaction_chance:
+        return
+
+    keyword_filters = [str(word).lower().strip() for word in (curr_config.get("emoji_reaction_keyword_filters") or []) if str(word).strip()]
+    if keyword_filters:
+        searchable = f"{trigger_msg.content}\n{reference_text}".lower()
+        if not any(keyword in searchable for keyword in keyword_filters):
+            return
+
+    now = now_ts()
+    channel_id = trigger_msg.channel.id
+    reaction_cooldown_seconds = max(int(float(curr_config.get("emoji_reaction_cooldown_seconds", 60) or 60)), 0)
+    reaction_max_per_hour_per_channel = max(int(float(curr_config.get("emoji_reaction_max_per_hour_per_channel", 8) or 8)), 0)
+
+    if redis_client_instance is not None:
+        claim_key = f"llmcord:emoji_reaction:claim:{channel_id}:{trigger_msg.id}"
+        claimed = await redis_client_instance.set(claim_key, get_bot_identity(), ex=45, nx=True)
+        if not claimed:
+            return
+
+        last_ts_key = f"llmcord:emoji_reaction:last_ts:{channel_id}"
+        if reaction_cooldown_seconds > 0:
+            last_ts = float(await redis_client_instance.get(last_ts_key) or 0)
+            if now - last_ts < reaction_cooldown_seconds:
+                return
+
+        hour_bucket = int(now // 3600)
+        per_hour_key = f"llmcord:emoji_reaction:hour_count:{channel_id}:{hour_bucket}"
+        if reaction_max_per_hour_per_channel > 0:
+            hour_count = int(await redis_client_instance.get(per_hour_key) or 0)
+            if hour_count >= reaction_max_per_hour_per_channel:
+                return
+
+    randomized = emoji_choices[:]
+    random.shuffle(randomized)
+    reacted = False
+    for emoji in randomized:
+        try:
+            await trigger_msg.add_reaction(emoji)
+            reacted = True
+            break
+        except (discord.Forbidden, discord.NotFound):
+            return
+        except discord.HTTPException:
+            continue
+
+    if not reacted:
+        return
+
+    if redis_client_instance is not None:
+        await redis_client_instance.set(
+            f"llmcord:emoji_reaction:last_ts:{channel_id}",
+            now,
+            ex=max(reaction_cooldown_seconds, 3600),
+        )
+        hour_bucket = int(now // 3600)
+        per_hour_key = f"llmcord:emoji_reaction:hour_count:{channel_id}:{hour_bucket}"
         hour_count = await redis_client_instance.incr(per_hour_key)
         if hour_count == 1:
             await redis_client_instance.expire(per_hour_key, 2 * 3600)
@@ -397,7 +598,44 @@ def today_key(curr_config: dict[str, Any]) -> str:
     return datetime.now(timezone.utc).astimezone(get_timezone(curr_config)).strftime("%Y-%m-%d")
 
 
-async def generate_proactive_starter_text(curr_config: dict[str, Any], target_user_id: Optional[int], max_chars: int) -> str:
+def message_looks_like_short_reaction(content: str, max_chars: int) -> bool:
+    normalized = " ".join((content or "").strip().split())
+    if normalized == "":
+        return False
+    if max_chars > 0 and len(normalized) > max_chars:
+        return False
+    if normalized.lower().startswith(("http://", "https://")):
+        return False
+    tokens = re.findall(r"[a-z0-9']+", normalized.lower())
+    return 1 <= len(tokens) <= 8
+
+
+async def detect_recent_bot_target_message(new_msg: discord.Message, window_seconds: float) -> Optional[discord.Message]:
+    if window_seconds <= 0:
+        return None
+    try:
+        prior_msgs = [m async for m in new_msg.channel.history(before=new_msg, limit=12)]
+    except (discord.NotFound, discord.HTTPException):
+        return None
+
+    latest_bot_msg = next((m for m in prior_msgs if m.author.bot), None)
+    if latest_bot_msg is None:
+        return None
+
+    age_seconds = (new_msg.created_at - latest_bot_msg.created_at).total_seconds()
+    if age_seconds < 0 or age_seconds > window_seconds:
+        return None
+    return latest_bot_msg
+
+
+async def generate_proactive_starter_text(
+    curr_config: dict[str, Any],
+    target_user_id: Optional[int],
+    max_chars: int,
+    *,
+    target_bot_name: Optional[str] = None,
+    bot_to_bot: bool = False,
+) -> str:
     provider_slash_model = curr_model
     provider, model = provider_slash_model.removesuffix(":vision").split("/", 1)
     provider_config = curr_config["providers"][provider]
@@ -411,17 +649,29 @@ async def generate_proactive_starter_text(curr_config: dict[str, Any], target_us
     accept_usernames = any(provider_slash_model.lower().startswith(x) for x in PROVIDERS_SUPPORTING_USERNAMES)
     system_prompt = build_system_prompt_for_model(curr_config, accept_usernames)
 
-    mention_instruction = (
-        f"Start with '<@{target_user_id}>' and ask that person directly."
-        if target_user_id is not None
-        else "Do not include any user mentions."
-    )
-    user_instruction = (
-        "Write exactly one short proactive Discord message to re-start casual chat naturally. "
-        f"Keep it under {max_chars} characters, one sentence, conversational, and not repetitive. "
-        "No lists, no markdown, no hashtags, no @everyone, no @here, no role mentions. "
-        f"{mention_instruction}"
-    )
+    if bot_to_bot and target_bot_name:
+        mention_instruction = (
+            f"Address {target_bot_name} directly by name in plain text. "
+            "Do not use @ mentions or mention syntax."
+        )
+        user_instruction = (
+            "Write exactly one short proactive Discord message that nudges another bot into the chat naturally. "
+            f"Keep it under {max_chars} characters, one sentence, conversational, and not repetitive. "
+            "No lists, no markdown, no hashtags, no @everyone, no @here, and no mention tokens. "
+            f"{mention_instruction}"
+        )
+    else:
+        mention_instruction = (
+            f"Start with '<@{target_user_id}>' and ask that person directly."
+            if target_user_id is not None
+            else "Do not include any user mentions."
+        )
+        user_instruction = (
+            "Write exactly one short proactive Discord message to re-start casual chat naturally. "
+            f"Keep it under {max_chars} characters, one sentence, conversational, and not repetitive. "
+            "No lists, no markdown, no hashtags, no @everyone, no @here, no role mentions. "
+            f"{mention_instruction}"
+        )
 
     messages: list[dict[str, str]] = [dict(role="user", content=user_instruction)]
     if system_prompt:
@@ -453,7 +703,10 @@ async def generate_proactive_starter_text(curr_config: dict[str, Any], target_us
             )
 
     content = sanitize_proactive_message(content, max_chars, target_user_id)
-    if target_user_id is not None and content != "" and "<@" not in content:
+    if bot_to_bot:
+        content = re.sub(r"(^|\s)@([A-Za-z0-9_]{2,32})", r"\1\2", content).strip()
+        content = sanitize_proactive_message(content, max_chars, target_user_id=None)
+    if not bot_to_bot and target_user_id is not None and content != "" and "<@" not in content:
         content = f"<@{target_user_id}> {content}".strip()
         content = sanitize_proactive_message(content, max_chars, target_user_id)
     return content
@@ -528,6 +781,22 @@ async def maybe_send_proactive_starter(curr_config: dict[str, Any], redis_client
     mention_chance = clamp_01(float(curr_config.get("proactive_mention_chance", 0.5) or 0.5))
     mention_recent_user_seconds = max(float(curr_config.get("proactive_mention_recent_user_seconds", 172800) or 0), 0)
     mention_max_per_user_per_day = max(int(float(curr_config.get("proactive_mention_max_per_user_per_day", 1) or 1)), 0)
+    proactive_bot_to_bot_enabled = bool(curr_config.get("proactive_bot_to_bot_enabled", True))
+    proactive_bot_to_bot_chance = clamp_01(float(curr_config.get("proactive_bot_to_bot_chance", 0.2) or 0.2))
+    proactive_bot_to_bot_max_per_day_per_channel = max(
+        int(float(curr_config.get("proactive_bot_to_bot_max_per_day_per_channel", 2) or 2)),
+        0,
+    )
+    proactive_bot_to_bot_cooldown_seconds = max(float(curr_config.get("proactive_bot_to_bot_cooldown_seconds", 1800) or 0), 0)
+    proactive_bot_to_bot_max_chain_without_human = max(
+        int(float(curr_config.get("proactive_bot_to_bot_max_chain_without_human", 1) or 1)),
+        0,
+    )
+    proactive_bot_to_bot_recent_bot_seconds = max(
+        float(curr_config.get("proactive_bot_to_bot_recent_bot_seconds", 172800) or 0),
+        0,
+    )
+    proactive_bot_to_bot_name_mode = str(curr_config.get("proactive_bot_to_bot_name_mode", "plain") or "plain").lower().strip()
 
     last_human_ts = float(await redis_client_instance.get(f"llmcord:afk:last_human_ts:{channel_id}") or 0)
     last_any_msg_ts = float(await redis_client_instance.get(f"llmcord:channel:last_message_ts:{channel_id}") or 0)
@@ -542,6 +811,9 @@ async def maybe_send_proactive_starter(curr_config: dict[str, Any], redis_client
 
     day_key = today_key(curr_config)
     daily_key = f"llmcord:proactive:daily:{channel_id}:{day_key}"
+    b2b_daily_key = f"llmcord:proactive:b2b:daily:{channel_id}:{day_key}"
+    b2b_last_ts_key = f"llmcord:proactive:b2b:last_ts:{channel_id}"
+    b2b_chain_key = f"llmcord:proactive:b2b:chain:{channel_id}"
     if max_daily > 0 and int(await redis_client_instance.get(daily_key) or 0) >= max_daily:
         return
 
@@ -560,7 +832,47 @@ async def maybe_send_proactive_starter(curr_config: dict[str, Any], redis_client
         return
 
     target_user_id = None
-    if mention_enabled and mention_max_per_user_per_day > 0 and random.random() <= mention_chance:
+    target_bot_id = None
+    target_bot_name = None
+    is_bot_to_bot = False
+
+    if proactive_bot_to_bot_enabled and random.random() <= proactive_bot_to_bot_chance:
+        b2b_daily_count = int(await redis_client_instance.get(b2b_daily_key) or 0)
+        b2b_last_ts = float(await redis_client_instance.get(b2b_last_ts_key) or 0)
+        b2b_chain_count = int(await redis_client_instance.get(b2b_chain_key) or 0)
+        passes_daily_cap = proactive_bot_to_bot_max_per_day_per_channel <= 0 or b2b_daily_count < proactive_bot_to_bot_max_per_day_per_channel
+        passes_cooldown = proactive_bot_to_bot_cooldown_seconds <= 0 or now - b2b_last_ts >= proactive_bot_to_bot_cooldown_seconds
+        passes_chain_cap = proactive_bot_to_bot_max_chain_without_human <= 0 or b2b_chain_count < proactive_bot_to_bot_max_chain_without_human
+
+        if passes_daily_cap and passes_cooldown and passes_chain_cap:
+            recent_bots_key = f"llmcord:channel:recent_bots:{channel_id}"
+            min_recent_ts = now - proactive_bot_to_bot_recent_bot_seconds if proactive_bot_to_bot_recent_bot_seconds > 0 else 0
+            candidate_bot_ids = await redis_client_instance.zrevrangebyscore(recent_bots_key, max="+inf", min=min_recent_ts, start=0, num=25)
+            random.shuffle(candidate_bot_ids)
+
+            own_id = discord_bot.user.id if discord_bot.user else None
+            for candidate_bot_id_str in candidate_bot_ids:
+                try:
+                    candidate_bot_id = int(candidate_bot_id_str)
+                except ValueError:
+                    continue
+                if own_id is not None and candidate_bot_id == own_id:
+                    continue
+
+                bot_name_key = f"llmcord:bot:display_name:{candidate_bot_id}"
+                candidate_bot_name = str(await redis_client_instance.get(bot_name_key) or "").strip()
+                if not candidate_bot_name:
+                    continue
+
+                if proactive_bot_to_bot_name_mode == "mention":
+                    candidate_bot_name = f"<@{candidate_bot_id}>"
+
+                target_bot_id = candidate_bot_id
+                target_bot_name = candidate_bot_name
+                is_bot_to_bot = True
+                break
+
+    if not is_bot_to_bot and mention_enabled and mention_max_per_user_per_day > 0 and random.random() <= mention_chance:
         recent_humans_key = f"llmcord:channel:recent_humans:{channel_id}"
         min_recent_ts = now - mention_recent_user_seconds
         candidate_user_ids = await redis_client_instance.zrevrangebyscore(recent_humans_key, max="+inf", min=min_recent_ts, start=0, num=25)
@@ -592,7 +904,13 @@ async def maybe_send_proactive_starter(curr_config: dict[str, Any], redis_client
     starter_text = None
     starter_text_hash = None
     for _ in range(retries):
-        candidate_text = await generate_proactive_starter_text(curr_config, target_user_id, proactive_max_chars)
+        candidate_text = await generate_proactive_starter_text(
+            curr_config,
+            target_user_id,
+            proactive_max_chars,
+            target_bot_name=target_bot_name,
+            bot_to_bot=is_bot_to_bot,
+        )
         if candidate_text == "":
             continue
 
@@ -611,7 +929,7 @@ async def maybe_send_proactive_starter(curr_config: dict[str, Any], redis_client
     if starter_text is None:
         fallback_text = str(curr_config.get("proactive_fallback_starter", "") or "")
         starter_text = sanitize_proactive_message(fallback_text, proactive_max_chars, target_user_id)
-        if target_user_id is not None and "<@" not in starter_text:
+        if not is_bot_to_bot and target_user_id is not None and "<@" not in starter_text:
             starter_text = f"<@{target_user_id}> {starter_text}".strip()
         if starter_text == "":
             return
@@ -620,7 +938,7 @@ async def maybe_send_proactive_starter(curr_config: dict[str, Any], redis_client
         await channel.send(
             starter_text,
             silent=True,
-            allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+            allowed_mentions=discord.AllowedMentions(users=(not is_bot_to_bot), roles=False, everyone=False),
         )
     except (discord.Forbidden, discord.NotFound, discord.HTTPException):
         return
@@ -633,6 +951,13 @@ async def maybe_send_proactive_starter(curr_config: dict[str, Any], redis_client
     daily_count = await redis_client_instance.incr(daily_key)
     if daily_count == 1:
         await redis_client_instance.expire(daily_key, ttl_seconds)
+    if is_bot_to_bot and target_bot_id is not None:
+        b2b_daily_count = await redis_client_instance.incr(b2b_daily_key)
+        if b2b_daily_count == 1:
+            await redis_client_instance.expire(b2b_daily_key, ttl_seconds)
+        await redis_client_instance.set(b2b_last_ts_key, now, ex=7 * 24 * 3600)
+        await redis_client_instance.incr(b2b_chain_key)
+        await redis_client_instance.expire(b2b_chain_key, 7 * 24 * 3600)
     await redis_client_instance.set(f"llmcord:channel:last_message_ts:{channel_id}", now, ex=7 * 24 * 3600)
     if target_user_id is not None and mention_max_per_user_per_day > 0:
         mention_daily_key = f"llmcord:proactive:mention_user_daily:{channel_id}:{target_user_id}:{day_key}"
@@ -940,6 +1265,30 @@ async def on_message(new_msg: discord.Message) -> None:
     is_direct_reply = bool(parent_msg and discord_bot.user and parent_msg.author.id == discord_bot.user.id)
     is_reply_to_other_bot = bool(parent_msg and parent_msg.author.bot and discord_bot.user and parent_msg.author.id != discord_bot.user.id)
     is_directed_message = has_direct_mention or is_direct_reply or has_everyone_directive
+    implicit_targeting_enabled = bool(config.get("implicit_targeting_enabled", True))
+    implicit_targeting_window_seconds = max(float(config.get("implicit_targeting_window_seconds", 10) or 0), 0)
+    implicit_targeting_max_chars = max(int(float(config.get("implicit_targeting_max_chars", 40) or 0)), 0)
+    implicit_targeting_fallback_wait_seconds = max(float(config.get("implicit_targeting_fallback_wait_seconds", 4) or 0), 0)
+    implicit_target_bot_msg = None
+    implicit_target_bot_id = None
+    is_implicit_target_for_this_bot = False
+    if (
+        implicit_targeting_enabled
+        and not is_dm
+        and not new_msg.author.bot
+        and not has_direct_mention
+        and not is_direct_reply
+        and not has_everyone_directive
+        and not mentions_any_bot
+        and parent_msg is None
+        and message_looks_like_short_reaction(new_msg.content, implicit_targeting_max_chars)
+    ):
+        implicit_target_bot_msg = await detect_recent_bot_target_message(new_msg, implicit_targeting_window_seconds)
+        if implicit_target_bot_msg is not None:
+            implicit_target_bot_id = implicit_target_bot_msg.author.id
+            is_implicit_target_for_this_bot = bool(discord_bot.user and implicit_target_bot_id == discord_bot.user.id)
+
+    is_effectively_directed_message = is_directed_message or is_implicit_target_for_this_bot
     should_process = True
 
     strict_reply_targeting = bool(config.get("strict_reply_targeting", True))
@@ -948,7 +1297,7 @@ async def on_message(new_msg: discord.Message) -> None:
 
     direct_mention_retry_enabled = bool(config.get("direct_mention_retry_enabled", True))
     direct_mention_fast_lane_enabled = bool(config.get("direct_mention_fast_lane_enabled", True))
-    remaining_direct_wait_seconds = max(float(config.get("direct_mention_max_wait_seconds", 7200) or 0), 0) if is_directed_message else 0
+    remaining_direct_wait_seconds = max(float(config.get("direct_mention_max_wait_seconds", 7200) or 0), 0) if is_effectively_directed_message else 0
 
     if not is_dm:
         autonomous_bot_only_mode = config.get("autonomous_bot_only_mode", False)
@@ -957,7 +1306,7 @@ async def on_message(new_msg: discord.Message) -> None:
 
         if in_autonomous_scope:
             # Explicit @mentions/replies should always trigger in autonomous channels.
-            if has_direct_mention or is_direct_reply:
+            if has_direct_mention or is_direct_reply or is_implicit_target_for_this_bot:
                 should_process = True
             elif mentions_any_bot:
                 # If another bot is explicitly mentioned, don't probabilistically jump in.
@@ -978,7 +1327,7 @@ async def on_message(new_msg: discord.Message) -> None:
                     effective_chance = clamp_01(effective_chance * bot_to_bot_response_chance_multiplier)
                 should_process = random.random() < effective_chance
         else:
-            should_process = has_direct_mention or is_direct_reply
+            should_process = has_direct_mention or is_direct_reply or is_implicit_target_for_this_bot
 
     allow_dms = config.get("allow_dms", True)
 
@@ -1001,6 +1350,7 @@ async def on_message(new_msg: discord.Message) -> None:
     if is_bad_user or is_bad_channel:
         return
 
+    implicit_fallback_open = False
     redis_client_instance = None
     if not is_dm:
         try:
@@ -1016,12 +1366,29 @@ async def on_message(new_msg: discord.Message) -> None:
             await redis_client_instance.set(f"llmcord:channel:last_message_ts:{channel_id}", now, ex=7 * 24 * 3600)
 
             consecutive_bot_turns_key = f"llmcord:channel:consecutive_bot_turns:{channel_id}"
+            proactive_b2b_chain_key = f"llmcord:proactive:b2b:chain:{channel_id}"
             if new_msg.author.bot:
                 consecutive_bot_turns = int(await redis_client_instance.incr(consecutive_bot_turns_key))
                 await redis_client_instance.expire(consecutive_bot_turns_key, 7 * 24 * 3600)
+                recent_bots_key = f"llmcord:channel:recent_bots:{channel_id}"
+                await redis_client_instance.zadd(recent_bots_key, {str(new_msg.author.id): now})
+                await redis_client_instance.expire(recent_bots_key, 14 * 24 * 3600)
+                author_name = (
+                    getattr(new_msg.author, "display_name", None)
+                    or getattr(new_msg.author, "global_name", None)
+                    or getattr(new_msg.author, "name", None)
+                    or ""
+                )
+                if author_name:
+                    await redis_client_instance.set(
+                        f"llmcord:bot:display_name:{new_msg.author.id}",
+                        str(author_name)[:80],
+                        ex=30 * 24 * 3600,
+                    )
             else:
                 consecutive_bot_turns = 0
                 await redis_client_instance.set(consecutive_bot_turns_key, 0, ex=7 * 24 * 3600)
+                await redis_client_instance.set(proactive_b2b_chain_key, 0, ex=7 * 24 * 3600)
 
             if not new_msg.author.bot:
                 await redis_client_instance.set(f"llmcord:afk:last_human_ts:{channel_id}", now, ex=7 * 24 * 3600)
@@ -1029,6 +1396,32 @@ async def on_message(new_msg: discord.Message) -> None:
                 await redis_client_instance.zadd(recent_humans_key, {str(new_msg.author.id): now})
                 await redis_client_instance.expire(recent_humans_key, 14 * 24 * 3600)
                 await maybe_schedule_afk_followup(new_msg, config, redis_client_instance)
+
+            if (
+                implicit_target_bot_id is not None
+                and not is_implicit_target_for_this_bot
+                and not new_msg.author.bot
+                and implicit_targeting_fallback_wait_seconds > 0
+            ):
+                implicit_coord_key = f"llmcord:implicit_target:coord:{channel_id}:{new_msg.id}"
+                coord_ttl_seconds = max(int(implicit_targeting_fallback_wait_seconds) + 2, 3)
+                await redis_client_instance.set(implicit_coord_key, str(implicit_target_bot_id), ex=coord_ttl_seconds, nx=True)
+                coord_value = await redis_client_instance.get(implicit_coord_key)
+                if coord_value is not None:
+                    try:
+                        coord_target_bot_id = int(coord_value)
+                    except ValueError:
+                        coord_target_bot_id = None
+
+                    if coord_target_bot_id == implicit_target_bot_id:
+                        await asyncio.sleep(implicit_targeting_fallback_wait_seconds)
+                        try:
+                            fallback_recent_msgs = [m async for m in new_msg.channel.history(limit=8)]
+                        except (discord.NotFound, discord.HTTPException):
+                            fallback_recent_msgs = []
+                        if any(m.author.bot and m.id != new_msg.id and m.created_at > new_msg.created_at for m in fallback_recent_msgs):
+                            return
+                        implicit_fallback_open = True
 
             if not is_directed_message and new_msg.author.bot:
                 max_consecutive_bot_turns_without_human = max(int(float(config.get("max_consecutive_bot_turns_without_human", 4) or 4)), 0)
@@ -1042,6 +1435,8 @@ async def on_message(new_msg: discord.Message) -> None:
                     if now - pair_last_reply_ts < pair_back_and_forth_cooldown_seconds:
                         should_process = False
 
+        if implicit_fallback_open:
+            should_process = True
         if not should_process:
             return
 
@@ -1052,7 +1447,7 @@ async def on_message(new_msg: discord.Message) -> None:
 
     global_channel_cooldown_seconds = max(float(config.get("global_channel_cooldown_seconds", 0) or 0), 0)
     global_channel_arbitration_jitter_seconds = max(float(config.get("global_channel_arbitration_jitter_seconds", 0) or 0), 0)
-    if not is_dm and not (is_directed_message and direct_mention_fast_lane_enabled) and (global_channel_cooldown_seconds > 0 or global_channel_arbitration_jitter_seconds > 0):
+    if not is_dm and not (is_effectively_directed_message and direct_mention_fast_lane_enabled) and (global_channel_cooldown_seconds > 0 or global_channel_arbitration_jitter_seconds > 0):
         while True:
             if global_channel_arbitration_jitter_seconds > 0:
                 await asyncio.sleep(random.uniform(0, global_channel_arbitration_jitter_seconds))
@@ -1078,7 +1473,7 @@ async def on_message(new_msg: discord.Message) -> None:
             if wait_seconds <= 0:
                 break
 
-            if is_directed_message and direct_mention_retry_enabled and remaining_direct_wait_seconds > 0:
+            if is_effectively_directed_message and direct_mention_retry_enabled and remaining_direct_wait_seconds > 0:
                 sleep_for = min(wait_seconds, remaining_direct_wait_seconds)
                 await asyncio.sleep(max(sleep_for, 0))
                 remaining_direct_wait_seconds = max(0.0, remaining_direct_wait_seconds - sleep_for)
@@ -1090,7 +1485,7 @@ async def on_message(new_msg: discord.Message) -> None:
 
     response_cooldown_seconds = max(float(config.get("response_cooldown_seconds", 0) or 0), 0)
     response_cooldown_jitter_seconds = max(float(config.get("response_cooldown_jitter_seconds", 0) or 0), 0)
-    if not (is_directed_message and direct_mention_fast_lane_enabled) and (response_cooldown_seconds > 0 or response_cooldown_jitter_seconds > 0):
+    if not (is_effectively_directed_message and direct_mention_fast_lane_enabled) and (response_cooldown_seconds > 0 or response_cooldown_jitter_seconds > 0):
         channel_id = new_msg.channel.id
         while True:
             curr_time = monotonic()
@@ -1101,7 +1496,7 @@ async def on_message(new_msg: discord.Message) -> None:
                     break
                 wait_seconds = next_available_time - curr_time
 
-            if is_directed_message and direct_mention_retry_enabled and remaining_direct_wait_seconds > 0:
+            if is_effectively_directed_message and direct_mention_retry_enabled and remaining_direct_wait_seconds > 0:
                 sleep_for = min(wait_seconds, remaining_direct_wait_seconds)
                 await asyncio.sleep(max(sleep_for, 0))
                 remaining_direct_wait_seconds = max(0.0, remaining_direct_wait_seconds - sleep_for)
@@ -1135,17 +1530,17 @@ async def on_message(new_msg: discord.Message) -> None:
             if response_index == 1:
                 await redis_client_instance.expire(source_count_key, source_message_window_seconds)
 
-            if response_index > max_responses_per_source_message and not is_directed_message:
+            if response_index > max_responses_per_source_message and not is_effectively_directed_message:
                 await redis_client_instance.decr(source_count_key)
                 return
 
-            if response_index > 1 and not is_directed_message and random.random() >= followup_response_chance:
+            if response_index > 1 and not is_effectively_directed_message and random.random() >= followup_response_chance:
                 await redis_client_instance.decr(source_count_key)
                 return
 
             claimed_active = await redis_client_instance.set(active_responder_key, bot_identity, ex=active_responder_ttl_seconds, nx=True)
             if not claimed_active:
-                if not (is_directed_message and direct_mention_retry_enabled):
+                if not (is_effectively_directed_message and direct_mention_retry_enabled):
                     await redis_client_instance.decr(source_count_key)
                     return
                 active_responder_key = None
@@ -1374,6 +1769,12 @@ async def on_message(new_msg: discord.Message) -> None:
         await maybe_send_curated_gif_reply(
             trigger_msg=new_msg,
             reply_target=response_msgs[-1],
+            curr_config=config,
+            redis_client_instance=redis_client_instance,
+            reference_text=final_text,
+        )
+        await maybe_add_emoji_reaction(
+            trigger_msg=new_msg,
             curr_config=config,
             redis_client_instance=redis_client_instance,
             reference_text=final_text,

@@ -62,6 +62,17 @@ proactive_mention_enabled: false
 proactive_mention_chance: 0.5
 proactive_mention_recent_user_seconds: 172800
 proactive_mention_max_per_user_per_day: 1
+proactive_bot_to_bot_enabled: true
+proactive_bot_to_bot_chance: 0.2
+proactive_bot_to_bot_max_per_day_per_channel: 2
+proactive_bot_to_bot_cooldown_seconds: 1800
+proactive_bot_to_bot_max_chain_without_human: 1
+proactive_bot_to_bot_recent_bot_seconds: 172800
+proactive_bot_to_bot_name_mode: "plain"  # plain | mention (mention is not recommended)
+implicit_targeting_enabled: true
+implicit_targeting_window_seconds: 10
+implicit_targeting_max_chars: 40
+implicit_targeting_fallback_wait_seconds: 4
 generated_user_mentions_mode: "question_only"  # always | question_only | never
 strict_reply_targeting: true
 direct_mention_retry_enabled: true
@@ -72,11 +83,40 @@ gif_replies_enabled: false
 gif_reply_chance: 0.1
 gif_reply_cooldown_seconds: 180
 gif_reply_max_per_hour_per_channel: 4
+gif_recent_dedupe_window_seconds: 21600
+gif_bad_url_cooldown_seconds: 86400
+gif_bad_url_max_failures: 2
+gif_contextual_selection_enabled: true
 gif_reply_keyword_filters: []  # Optional lowercase words to gate GIF replies
 gif_reply_urls:
   - "https://media.giphy.com/media/JIX9t2j0ZTN9S/giphy.gif"
   - "https://media.giphy.com/media/ICOgUNjpvO0PC/giphy.gif"
   - "https://media.giphy.com/media/l0HlBO7eyXzSZkJri/giphy.gif"
+gif_catalog:
+  - url: "https://media.giphy.com/media/JIX9t2j0ZTN9S/giphy.gif"
+    tags: ["hype", "yes", "celebration", "approved", "win"]
+  - url: "https://media.giphy.com/media/ICOgUNjpvO0PC/giphy.gif"
+    tags: ["awkward", "thinking", "confused", "hmm", "question"]
+  - url: "https://media.giphy.com/media/l0HlBO7eyXzSZkJri/giphy.gif"
+    tags: ["party", "happy", "chaos", "fun", "energy"]
+emoji_reactions_enabled: false
+emoji_reaction_chance: 0.15
+emoji_reaction_cooldown_seconds: 60
+emoji_reaction_max_per_hour_per_channel: 8
+emoji_reaction_contextual_selection_enabled: true
+emoji_reaction_keyword_filters: []  # Optional lowercase words to gate emoji reactions
+emoji_reaction_choices: ["👍", "🔥", "😂", "👏", "💯"]
+emoji_reaction_catalog:
+  - emoji: "😂"
+    tags: ["funny", "lol", "lmao", "joke", "pun", "chaos"]
+  - emoji: "🔥"
+    tags: ["great", "awesome", "win", "ship", "success", "hype"]
+  - emoji: "💯"
+    tags: ["agree", "exactly", "facts", "true", "correct"]
+  - emoji: "👏"
+    tags: ["nice", "thanks", "good", "well done", "support"]
+  - emoji: "👍"
+    tags: ["ok", "yes", "sounds good", "approve", "solid"]
 mood_injector_enabled: false
 mood_rotation_mode: "daily"  # daily | hourly | per_message
 mood_influence_strength: "subtle"  # subtle | medium | strong

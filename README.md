@@ -135,6 +135,17 @@ Or run local models with:
 | **proactive_mention_chance** | Probability (0-1) a proactive starter attempt uses a targeted @mention format.<br /><br />Default: `0.5` |
 | **proactive_mention_recent_user_seconds** | How far back to consider users as "recently active" for proactive @mentions.<br /><br />Default: `172800` (48 hours) |
 | **proactive_mention_max_per_user_per_day** | Per-user daily cap for proactive in-channel @mentions.<br /><br />Default: `1` |
+| **proactive_bot_to_bot_enabled** | Enables proactive starters where one bot addresses another bot in-channel.<br /><br />Default: `true` |
+| **proactive_bot_to_bot_chance** | Probability (0-1) that an eligible proactive attempt is bot-to-bot instead of human-targeted.<br /><br />Default: `0.2` |
+| **proactive_bot_to_bot_max_per_day_per_channel** | Daily cap for bot-to-bot proactive starters per channel.<br /><br />Default: `2` |
+| **proactive_bot_to_bot_cooldown_seconds** | Minimum spacing between bot-to-bot proactive starters in the same channel.<br /><br />Default: `1800` |
+| **proactive_bot_to_bot_max_chain_without_human** | Maximum consecutive bot-to-bot proactive starters allowed before a human message resets the chain.<br /><br />Default: `1` |
+| **proactive_bot_to_bot_recent_bot_seconds** | Time window used to select recently active bot candidates for bot-to-bot starters.<br /><br />Default: `172800` |
+| **proactive_bot_to_bot_name_mode** | Name style for bot-to-bot starters. Use `plain` to avoid mentions/pings.<br /><br />Default: `plain` |
+| **implicit_targeting_enabled** | Enables implicit recipient detection for short untagged human follow-ups (for example: `booo`, `lol`, `nah`).<br /><br />Default: `true` |
+| **implicit_targeting_window_seconds** | Max age of the most recent bot message to infer as the likely target.<br /><br />Default: `10` |
+| **implicit_targeting_max_chars** | Max message length eligible for implicit-target heuristics.<br /><br />Default: `40` |
+| **implicit_targeting_fallback_wait_seconds** | Time to give inferred target bot first chance before allowing fallback responses.<br /><br />Default: `4` |
 | **generated_user_mentions_mode** | Mention policy for generated replies: `always`, `question_only`, or `never`. `question_only` strips user mentions unless the message is phrased as a question.<br /><br />Default: `question_only` |
 | **strict_reply_targeting** | When `true`, replies to another bot's message are ignored unless this bot is explicitly @mentioned. Prevents cross-bot hijacking of direct replies.<br /><br />Default: `true` |
 | **direct_mention_retry_enabled** | When `true`, direct @mentions/replies are retried after cooldowns instead of being dropped immediately.<br /><br />Default: `true` |
@@ -145,8 +156,21 @@ Or run local models with:
 | **gif_reply_chance** | Probability (0-1) of sending a GIF reply when GIF mode is enabled.<br /><br />Default: `0.1` |
 | **gif_reply_cooldown_seconds** | Minimum delay between GIF replies in a channel.<br /><br />Default: `180` |
 | **gif_reply_max_per_hour_per_channel** | Maximum GIF replies allowed per channel per hour.<br /><br />Default: `4` |
+| **gif_recent_dedupe_window_seconds** | Time window for suppressing recently used GIF URLs in a channel.<br /><br />Default: `21600` |
+| **gif_bad_url_cooldown_seconds** | Quarantine duration for GIF URLs that repeatedly fail fetch/resolve checks in a channel.<br /><br />Default: `86400` |
+| **gif_bad_url_max_failures** | Number of failed fetch attempts before a GIF URL is temporarily quarantined.<br /><br />Default: `2` |
+| **gif_contextual_selection_enabled** | When `true`, ranks GIF candidates by overlap between message context and configured GIF tags.<br /><br />Default: `true` |
 | **gif_reply_keyword_filters** | Optional list of lowercase keywords; when set, GIF replies only trigger if a keyword appears in the human prompt or bot response text.<br /><br />Default: `[]` |
 | **gif_reply_urls** | Curated list of GIF or GIF-page URLs. The bot fetches and uploads the resolved image so Discord renders media instead of bare links. Leave empty to disable GIF output even if enabled.<br /><br />Default: example list |
+| **gif_catalog** | Optional tagged GIF catalog (`url` + `tags`) used for context-aware GIF selection. Falls back to `gif_reply_urls` when no tag match is found.<br /><br />Default: example tagged entries |
+| **emoji_reactions_enabled** | Enables optional emoji reactions (e.g. 👍 🔥 😂) on incoming messages.<br /><br />Default: `false` |
+| **emoji_reaction_chance** | Probability (0-1) of adding an emoji reaction when reaction mode is enabled.<br /><br />Default: `0.15` |
+| **emoji_reaction_cooldown_seconds** | Minimum delay between emoji reactions in a channel.<br /><br />Default: `60` |
+| **emoji_reaction_max_per_hour_per_channel** | Maximum emoji reactions allowed per channel per hour.<br /><br />Default: `8` |
+| **emoji_reaction_contextual_selection_enabled** | When `true`, ranks candidate reaction emojis using message context and catalog tags before fallback choices.<br /><br />Default: `true` |
+| **emoji_reaction_keyword_filters** | Optional lowercase keyword gate for emoji reactions based on human prompt or generated reply text.<br /><br />Default: `[]` |
+| **emoji_reaction_choices** | Candidate emoji list used for reactions; one is chosen randomly per reaction.<br /><br />Default: `["👍","🔥","😂","👏","💯"]` |
+| **emoji_reaction_catalog** | Optional tagged emoji catalog (`emoji` + `tags`) for context-aware reaction selection. Falls back to `emoji_reaction_choices` if no tag matches.<br /><br />Default: example tagged entries |
 | **mood_injector_enabled** | Enables optional mood injection into the system prompt to add human-like variability.<br /><br />Default: `false` |
 | **mood_rotation_mode** | Mood rotation cadence: `daily`, `hourly`, or `per_message`.<br /><br />Default: `daily` |
 | **mood_influence_strength** | How strongly mood affects tone: `subtle`, `medium`, `strong`.<br /><br />Default: `subtle` |
@@ -189,11 +213,11 @@ Or run local models with:
 
 Use one config per bot account and run all five processes at once.
 
-- `config_advocate.yaml`
-- `config_architect.yaml`
-- `config_coder.yaml`
-- `config_creative.yaml`
-- `config_security.yaml`
+- `config_kevin.yaml`
+- `config_saul.yaml`
+- `config_katherine.yaml`
+- `config_damon.yaml`
+- `config_sarah.yaml`
 
 Recommended safeguards for bot-only channels:
 - Set `permissions.channels.allowed_ids` to your private channel ID in each config.
@@ -204,11 +228,11 @@ Recommended safeguards for bot-only channels:
 
 Local run (5 terminals):
 ```bash
-CONFIG_FILE=config_advocate.yaml python llmcord.py
-CONFIG_FILE=config_architect.yaml python llmcord.py
-CONFIG_FILE=config_coder.yaml python llmcord.py
-CONFIG_FILE=config_creative.yaml python llmcord.py
-CONFIG_FILE=config_security.yaml python llmcord.py
+CONFIG_FILE=config_kevin.yaml python llmcord.py
+CONFIG_FILE=config_saul.yaml python llmcord.py
+CONFIG_FILE=config_katherine.yaml python llmcord.py
+CONFIG_FILE=config_damon.yaml python llmcord.py
+CONFIG_FILE=config_sarah.yaml python llmcord.py
 ```
 
 Docker run (all 5 at once):
