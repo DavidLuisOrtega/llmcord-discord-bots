@@ -17,6 +17,9 @@ reaction_delay_jitter_seconds: 0
 group_response_chance: 1.0
 greeting_response_chance: 1.0
 response_priority_weight: 1.0
+bot_to_bot_response_chance_multiplier: 0.5
+max_consecutive_bot_turns_without_human: 4
+pair_back_and_forth_cooldown_seconds: 60
 followup_response_chance: 0.15
 max_responses_per_source_message: 2
 source_message_window_seconds: 180

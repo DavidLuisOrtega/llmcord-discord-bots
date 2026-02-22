@@ -91,6 +91,9 @@ Or run local models with:
 | **group_response_chance** | In autonomous mode, probability (0-1) this bot responds to a non-directed message (not explicitly @mentioned and not a direct reply).<br /><br />Default: `1.0` |
 | **greeting_response_chance** | Optional override probability (0-1) for greeting-like messages (`hi`, `hello`, etc.) in autonomous mode.<br /><br />Default: `1.0` |
 | **response_priority_weight** | Multiplier applied to autonomous participation chance. Values over `1` make this bot more likely to join; values under `1` make it quieter.<br /><br />Default: `1.0` |
+| **bot_to_bot_response_chance_multiplier** | Multiplier applied when the triggering message author is another bot, reducing bot-to-bot chain momentum.<br /><br />Default: `0.5` |
+| **max_consecutive_bot_turns_without_human** | Maximum consecutive bot-authored turns allowed in a channel before bots pause until a human posts.<br /><br />Default: `4` |
+| **pair_back_and_forth_cooldown_seconds** | Cooldown to discourage immediate A↔B back-and-forth loops between the same bot pair.<br /><br />Default: `60` |
 | **followup_response_chance** | After one bot has already claimed a message, probability (0-1) this bot can become the follow-up responder for that same source message.<br /><br />Default: `0.15` |
 | **max_responses_per_source_message** | Hard cap on total bot responses for one source message when Redis coordination is enabled. Set to `2` for "usually 1-2 replies".<br /><br />Default: `2` |
 | **source_message_window_seconds** | TTL window for tracking response count per source message in Redis.<br /><br />Default: `180` |

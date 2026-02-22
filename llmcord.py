@@ -330,7 +330,7 @@ async def maybe_send_curated_gif_reply(
 
     try:
         file = discord.File(io.BytesIO(image_bytes), filename=f"reaction.{extension}")
-        await reply_target.reply(file=file, silent=True, mention_author=False)
+        await trigger_msg.channel.send(file=file, silent=True)
     except (discord.Forbidden, discord.NotFound, discord.HTTPException):
         return
 
@@ -756,7 +756,7 @@ async def process_afk_followup_item(item_id: str, curr_config: dict[str, Any], r
         return
 
     try:
-        await source_msg.reply(followup_text, silent=True)
+        await channel.send(followup_text, silent=True)
     except (discord.NotFound, discord.HTTPException):
         await redis_client_instance.zadd(schedule_zset_key, {item_id: now_ts() + 120})
         return
@@ -946,12 +946,15 @@ async def on_message(new_msg: discord.Message) -> None:
                 group_response_chance = clamp_01(float(config.get("group_response_chance", 1.0) or 1.0))
                 greeting_response_chance = config.get("greeting_response_chance")
                 response_priority_weight = max(float(config.get("response_priority_weight", 1.0) or 1.0), 0.0)
+                bot_to_bot_response_chance_multiplier = clamp_01(float(config.get("bot_to_bot_response_chance_multiplier", 0.5) or 0.5))
 
                 effective_chance = group_response_chance
                 if greeting_response_chance is not None and is_greeting_message(new_msg.content):
                     effective_chance = clamp_01(float(greeting_response_chance or 0.0))
 
                 effective_chance = clamp_01(effective_chance * response_priority_weight)
+                if new_msg.author.bot:
+                    effective_chance = clamp_01(effective_chance * bot_to_bot_response_chance_multiplier)
                 should_process = random.random() < effective_chance
         else:
             should_process = has_direct_mention or is_direct_reply
@@ -991,12 +994,32 @@ async def on_message(new_msg: discord.Message) -> None:
             await redis_client_instance.sadd("llmcord:observed_channels", str(channel_id))
             await redis_client_instance.set(f"llmcord:channel:last_message_ts:{channel_id}", now, ex=7 * 24 * 3600)
 
+            consecutive_bot_turns_key = f"llmcord:channel:consecutive_bot_turns:{channel_id}"
+            if new_msg.author.bot:
+                consecutive_bot_turns = int(await redis_client_instance.incr(consecutive_bot_turns_key))
+                await redis_client_instance.expire(consecutive_bot_turns_key, 7 * 24 * 3600)
+            else:
+                consecutive_bot_turns = 0
+                await redis_client_instance.set(consecutive_bot_turns_key, 0, ex=7 * 24 * 3600)
+
             if not new_msg.author.bot:
                 await redis_client_instance.set(f"llmcord:afk:last_human_ts:{channel_id}", now, ex=7 * 24 * 3600)
                 recent_humans_key = f"llmcord:channel:recent_humans:{channel_id}"
                 await redis_client_instance.zadd(recent_humans_key, {str(new_msg.author.id): now})
                 await redis_client_instance.expire(recent_humans_key, 14 * 24 * 3600)
                 await maybe_schedule_afk_followup(new_msg, config, redis_client_instance)
+
+            if not is_directed_message and new_msg.author.bot:
+                max_consecutive_bot_turns_without_human = max(int(float(config.get("max_consecutive_bot_turns_without_human", 4) or 4)), 0)
+                if max_consecutive_bot_turns_without_human > 0 and consecutive_bot_turns >= max_consecutive_bot_turns_without_human:
+                    should_process = False
+
+                pair_back_and_forth_cooldown_seconds = max(float(config.get("pair_back_and_forth_cooldown_seconds", 60) or 60), 0)
+                if pair_back_and_forth_cooldown_seconds > 0 and discord_bot.user:
+                    pair_key = f"llmcord:pair:last_reply:{channel_id}:{discord_bot.user.id}:{new_msg.author.id}"
+                    pair_last_reply_ts = float(await redis_client_instance.get(pair_key) or 0)
+                    if now - pair_last_reply_ts < pair_back_and_forth_cooldown_seconds:
+                        should_process = False
 
         if not should_process:
             return
@@ -1236,9 +1259,7 @@ async def on_message(new_msg: discord.Message) -> None:
         embed = discord.Embed.from_dict(dict(fields=[dict(name=warning, value="", inline=False) for warning in sorted(user_warnings)]))
 
     async def reply_helper(**reply_kwargs) -> None:
-        reply_target = new_msg if not response_msgs else response_msgs[-1]
-        reply_kwargs.setdefault("mention_author", False)
-        response_msg = await reply_target.reply(**reply_kwargs)
+        response_msg = await new_msg.channel.send(**reply_kwargs)
         response_msgs.append(response_msg)
 
         msg_nodes[response_msg.id] = MsgNode(parent_msg=new_msg)
@@ -1336,6 +1357,21 @@ async def on_message(new_msg: discord.Message) -> None:
             redis_client_instance=redis_client_instance,
             reference_text=final_text,
         )
+        if (
+            not is_dm
+            and redis_client_instance is not None
+            and discord_bot.user is not None
+            and new_msg.author.bot
+        ):
+            pair_back_and_forth_cooldown_seconds = max(float(config.get("pair_back_and_forth_cooldown_seconds", 60) or 60), 0)
+            if pair_back_and_forth_cooldown_seconds > 0:
+                channel_id = new_msg.channel.id
+                pair_key = f"llmcord:pair:last_reply:{channel_id}:{discord_bot.user.id}:{new_msg.author.id}"
+                await redis_client_instance.set(
+                    pair_key,
+                    now_ts(),
+                    ex=max(int(pair_back_and_forth_cooldown_seconds * 4), 300),
+                )
 
     for response_msg in response_msgs:
         msg_nodes[response_msg.id].text = final_text
