@@ -554,7 +554,7 @@ async def maybe_send_proactive_starter(curr_config: dict[str, Any], redis_client
         break
 
     if starter_text is None:
-        fallback_text = str(curr_config.get("proactive_fallback_starter", "quick check-in: if you're around, what's the vibe tonight?") or "")
+        fallback_text = str(curr_config.get("proactive_fallback_starter", "") or "")
         starter_text = sanitize_proactive_message(fallback_text, proactive_max_chars, target_user_id)
         if target_user_id is not None and "<@" not in starter_text:
             starter_text = f"<@{target_user_id}> {starter_text}".strip()
@@ -714,7 +714,7 @@ async def process_afk_followup_item(item_id: str, curr_config: dict[str, Any], r
             break
     if followup_text == "":
         followup_text = str(
-            curr_config.get("afk_followup_fallback_text", "no rush. drop your thoughts when you're back.") or ""
+            curr_config.get("afk_followup_fallback_text", "") or ""
         ).strip()[:afk_followup_max_chars]
     if followup_text == "":
         await redis_client_instance.zrem(schedule_zset_key, item_id)

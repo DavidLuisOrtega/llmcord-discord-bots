@@ -109,7 +109,7 @@ Or run local models with:
 | **afk_followup_chance** | Probability (0-1) each AFK follow-up attempt actually sends (adds natural randomness).<br /><br />Default: `0.5` |
 | **afk_followup_generation_retries** | Number of model-generation attempts for AFK follow-up text before fallback text is used.<br /><br />Default: `2` |
 | **afk_followup_max_chars** | Maximum characters for generated AFK follow-up text.<br /><br />Default: `140` |
-| **afk_followup_fallback_text** | Fallback AFK follow-up text when generation fails.<br /><br />Default: `no rush...` |
+| **afk_followup_fallback_text** | Optional fallback AFK follow-up text when generation fails. Leave empty to skip the follow-up instead of sending scripted text.<br /><br />Default: `""` |
 | **afk_cancel_on_any_human_message** | Cancel pending AFK follow-ups if any newer human message arrives in that channel.<br /><br />Default: `true` |
 | **afk_scheduler_poll_seconds** | How often each bot checks Redis for due AFK follow-up jobs.<br /><br />Default: `5` |
 | **quiet_hours_enabled** | Suppresses AFK follow-up sending during quiet hours (jobs are deferred, not dropped).<br /><br />Default: `false` |
@@ -127,7 +127,7 @@ Or run local models with:
 | **proactive_generation_retries** | Number of generation attempts for proactive openers before fallback text is used.<br /><br />Default: `3` |
 | **proactive_dedupe_window_seconds** | Duplicate suppression window for proactive starter text in a channel.<br /><br />Default: `86400` |
 | **proactive_generated_max_chars** | Max characters for generated proactive starters.<br /><br />Default: `180` |
-| **proactive_fallback_starter** | Fallback proactive message if generation fails or all attempts are duplicates.<br /><br />Default: `quick check-in...` |
+| **proactive_fallback_starter** | Optional fallback proactive message if generation fails or all attempts are duplicates. Leave empty to skip sending instead of posting scripted text.<br /><br />Default: `""` |
 | **proactive_mention_enabled** | When `true`, proactive starters may @mention a recently active human in-channel.<br /><br />Default: `false` |
 | **proactive_mention_chance** | Probability (0-1) a proactive starter attempt uses a targeted @mention format.<br /><br />Default: `0.5` |
 | **proactive_mention_recent_user_seconds** | How far back to consider users as "recently active" for proactive @mentions.<br /><br />Default: `172800` (48 hours) |

@@ -36,7 +36,7 @@ afk_max_followups_per_message: 2
 afk_followup_chance: 0.5
 afk_followup_generation_retries: 2
 afk_followup_max_chars: 140
-afk_followup_fallback_text: "no rush. drop your thoughts when you're back."
+afk_followup_fallback_text: ""  # Optional. Leave empty to skip AFK follow-up when generation fails.
 afk_cancel_on_any_human_message: true
 afk_scheduler_poll_seconds: 5
 quiet_hours_enabled: false
@@ -54,7 +54,7 @@ proactive_channel_ids: []
 proactive_generation_retries: 3
 proactive_dedupe_window_seconds: 86400
 proactive_generated_max_chars: 180
-proactive_fallback_starter: "quick check-in: if you're around, what's the vibe tonight?"
+proactive_fallback_starter: ""  # Optional. Leave empty to skip proactive starter when generation fails.
 proactive_mention_enabled: false
 proactive_mention_chance: 0.5
 proactive_mention_recent_user_seconds: 172800
