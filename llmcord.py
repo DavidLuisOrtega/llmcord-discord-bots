@@ -250,6 +250,92 @@ def deterministic_fraction(seed: str) -> float:
     return value / 0xFFFFFFFF
 
 
+def deterministic_jittered_threshold(base_seconds: float, jitter_seconds: float, seed: str) -> float:
+    if base_seconds <= 0:
+        return 0.0
+    jitter = max(jitter_seconds, 0.0)
+    if jitter == 0:
+        return base_seconds
+    # Deterministic +/- jitter so all bot instances use the same threshold per channel/window.
+    offset = (deterministic_fraction(seed) * 2.0 - 1.0) * jitter
+    return max(base_seconds + offset, 0.0)
+
+
+def parse_relationship_weights(curr_config: dict[str, Any]) -> tuple[dict[tuple[str, str], float], set[str]]:
+    raw = curr_config.get("proactive_bot_to_bot_relationship_weights") or {}
+    if not isinstance(raw, dict):
+        return {}, set()
+
+    weights: dict[tuple[str, str], float] = {}
+    identities: set[str] = set()
+    for raw_key, raw_value in raw.items():
+        key = str(raw_key).strip().lower()
+        try:
+            weight = max(float(raw_value), 0.0)
+        except (TypeError, ValueError):
+            continue
+        if weight <= 0:
+            continue
+
+        if "<->" in key:
+            left, right = [part.strip() for part in key.split("<->", 1)]
+            if left and right:
+                weights[(left, right)] = weight
+                weights[(right, left)] = weight
+                identities.update((left, right))
+            continue
+
+        if "->" in key:
+            left, right = [part.strip() for part in key.split("->", 1)]
+            if left and right:
+                weights[(left, right)] = weight
+                identities.update((left, right))
+            continue
+
+        if ":" in key:
+            left, right = [part.strip() for part in key.split(":", 1)]
+            if left and right:
+                weights[(left, right)] = weight
+                weights[(right, left)] = weight
+                identities.update((left, right))
+            continue
+
+    return weights, identities
+
+
+def resolve_relationship_identity(value: str, known_identities: set[str]) -> str:
+    normalized = re.sub(r"<@!?\d+>", "", (value or "").strip().lower())
+    normalized = re.sub(r"[^a-z0-9 _-]", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    if not normalized:
+        return ""
+
+    tokens = normalized.split(" ")
+    for token in tokens:
+        if token in known_identities:
+            return token
+    if normalized in known_identities:
+        return normalized
+    # Fallback: use first token as lightweight identity hint.
+    return tokens[0] if tokens else normalized
+
+
+def weighted_choice(candidates: list[tuple[Any, float]]) -> Optional[Any]:
+    viable = [(item, weight) for item, weight in candidates if weight > 0]
+    if not viable:
+        return None
+    total_weight = sum(weight for _, weight in viable)
+    if total_weight <= 0:
+        return None
+    cursor = random.uniform(0, total_weight)
+    running = 0.0
+    for item, weight in viable:
+        running += weight
+        if cursor <= running:
+            return item
+    return viable[-1][0]
+
+
 def maybe_add_profile_filler(text: str, curr_config: dict[str, Any], profile: str) -> str:
     fillers = [str(item).strip() for item in (curr_config.get("persona_preferred_fillers") or []) if str(item).strip()]
     if not fillers:
@@ -1072,6 +1158,14 @@ async def maybe_send_proactive_starter(curr_config: dict[str, Any], redis_client
         0,
     )
     proactive_bot_to_bot_name_mode = str(curr_config.get("proactive_bot_to_bot_name_mode", "plain") or "plain").lower().strip()
+    proactive_bot_to_bot_idle_human_seconds = max(float(curr_config.get("proactive_bot_to_bot_idle_human_seconds", 3600) or 0), 0)
+    proactive_bot_to_bot_idle_channel_seconds = max(float(curr_config.get("proactive_bot_to_bot_idle_channel_seconds", 3600) or 0), 0)
+    proactive_bot_to_bot_idle_jitter_seconds = max(float(curr_config.get("proactive_bot_to_bot_idle_jitter_seconds", 600) or 0), 0)
+    proactive_bot_to_bot_relationship_default_weight = max(
+        float(curr_config.get("proactive_bot_to_bot_relationship_default_weight", 1.0) or 1.0),
+        0.0,
+    )
+    relationship_weights, known_relationship_identities = parse_relationship_weights(curr_config)
 
     last_human_ts = float(await redis_client_instance.get(f"llmcord:afk:last_human_ts:{channel_id}") or 0)
     last_any_msg_ts = float(await redis_client_instance.get(f"llmcord:channel:last_message_ts:{channel_id}") or 0)
@@ -1118,14 +1212,31 @@ async def maybe_send_proactive_starter(curr_config: dict[str, Any], redis_client
         passes_daily_cap = proactive_bot_to_bot_max_per_day_per_channel <= 0 or b2b_daily_count < proactive_bot_to_bot_max_per_day_per_channel
         passes_cooldown = proactive_bot_to_bot_cooldown_seconds <= 0 or now - b2b_last_ts >= proactive_bot_to_bot_cooldown_seconds
         passes_chain_cap = proactive_bot_to_bot_max_chain_without_human <= 0 or b2b_chain_count < proactive_bot_to_bot_max_chain_without_human
+        b2b_human_idle_threshold = deterministic_jittered_threshold(
+            proactive_bot_to_bot_idle_human_seconds,
+            proactive_bot_to_bot_idle_jitter_seconds,
+            f"b2b-human-idle:{channel_id}:{int(now // 600)}",
+        )
+        b2b_channel_idle_threshold = deterministic_jittered_threshold(
+            proactive_bot_to_bot_idle_channel_seconds,
+            proactive_bot_to_bot_idle_jitter_seconds,
+            f"b2b-channel-idle:{channel_id}:{int(now // 600)}",
+        )
+        passes_b2b_idle_human = b2b_human_idle_threshold <= 0 or now - last_human_ts >= b2b_human_idle_threshold
+        passes_b2b_idle_channel = b2b_channel_idle_threshold <= 0 or now - last_any_msg_ts >= b2b_channel_idle_threshold
 
-        if passes_daily_cap and passes_cooldown and passes_chain_cap:
+        if passes_daily_cap and passes_cooldown and passes_chain_cap and passes_b2b_idle_human and passes_b2b_idle_channel:
             recent_bots_key = f"llmcord:channel:recent_bots:{channel_id}"
             min_recent_ts = now - proactive_bot_to_bot_recent_bot_seconds if proactive_bot_to_bot_recent_bot_seconds > 0 else 0
             candidate_bot_ids = await redis_client_instance.zrevrangebyscore(recent_bots_key, max="+inf", min=min_recent_ts, start=0, num=25)
-            random.shuffle(candidate_bot_ids)
-
             own_id = discord_bot.user.id if discord_bot.user else None
+            own_identity_hint = str(curr_config.get("persona_speech_profile", "") or "").strip().lower()
+            weighted_candidates: list[tuple[tuple[int, str], float]] = []
+            known_identities = set(known_relationship_identities)
+            if own_identity_hint:
+                known_identities.add(own_identity_hint)
+            known_identities.update({"kevin", "damon", "saul", "sarah", "katherine"})
+
             for candidate_bot_id_str in candidate_bot_ids:
                 try:
                     candidate_bot_id = int(candidate_bot_id_str)
@@ -1142,10 +1253,19 @@ async def maybe_send_proactive_starter(curr_config: dict[str, Any], redis_client
                 if proactive_bot_to_bot_name_mode == "mention":
                     candidate_bot_name = f"<@{candidate_bot_id}>"
 
-                target_bot_id = candidate_bot_id
-                target_bot_name = candidate_bot_name
+                target_identity_hint = resolve_relationship_identity(candidate_bot_name, known_identities)
+                relationship_weight = proactive_bot_to_bot_relationship_default_weight
+                if own_identity_hint and target_identity_hint:
+                    relationship_weight = relationship_weights.get(
+                        (own_identity_hint, target_identity_hint),
+                        proactive_bot_to_bot_relationship_default_weight,
+                    )
+                weighted_candidates.append(((candidate_bot_id, candidate_bot_name), relationship_weight))
+
+            chosen_candidate = weighted_choice(weighted_candidates)
+            if chosen_candidate is not None:
+                target_bot_id, target_bot_name = chosen_candidate
                 is_bot_to_bot = True
-                break
 
     if not is_bot_to_bot and mention_enabled and mention_max_per_user_per_day > 0 and random.random() <= mention_chance:
         recent_humans_key = f"llmcord:channel:recent_humans:{channel_id}"

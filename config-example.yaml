@@ -72,6 +72,14 @@ proactive_bot_to_bot_cooldown_seconds: 1800
 proactive_bot_to_bot_max_chain_without_human: 1
 proactive_bot_to_bot_recent_bot_seconds: 172800
 proactive_bot_to_bot_name_mode: "plain"  # plain | mention (mention is not recommended)
+proactive_bot_to_bot_idle_human_seconds: 3600
+proactive_bot_to_bot_idle_channel_seconds: 3600
+proactive_bot_to_bot_idle_jitter_seconds: 600
+proactive_bot_to_bot_relationship_default_weight: 1.0
+proactive_bot_to_bot_relationship_weights:
+  "kevin<->damon": 3.0
+  "saul<->sarah": 3.0
+  "damon<->katherine": 2.4
 implicit_targeting_enabled: true
 implicit_targeting_window_seconds: 10
 implicit_targeting_max_chars: 40

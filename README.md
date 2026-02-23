@@ -145,6 +145,11 @@ Or run local models with:
 | **proactive_bot_to_bot_max_chain_without_human** | Maximum consecutive bot-to-bot proactive starters allowed before a human message resets the chain.<br /><br />Default: `1` |
 | **proactive_bot_to_bot_recent_bot_seconds** | Time window used to select recently active bot candidates for bot-to-bot starters.<br /><br />Default: `172800` |
 | **proactive_bot_to_bot_name_mode** | Name style for bot-to-bot starters. Use `plain` to avoid mentions/pings.<br /><br />Default: `plain` |
+| **proactive_bot_to_bot_idle_human_seconds** | Dedicated human-idle gate for bot-to-bot proactive starters. Bots only attempt bot-to-bot starters after this much time since the last human message.<br /><br />Default: `3600` |
+| **proactive_bot_to_bot_idle_channel_seconds** | Dedicated channel-idle gate for bot-to-bot proactive starters. Bots only attempt bot-to-bot starters after this much time since any channel message.<br /><br />Default: `3600` |
+| **proactive_bot_to_bot_idle_jitter_seconds** | +/- jitter applied to bot-to-bot idle gates. Helps trigger around a natural window (for example ~1 hour ±10 min) instead of a fixed timestamp.<br /><br />Default: `600` |
+| **proactive_bot_to_bot_relationship_default_weight** | Baseline candidate weight for bot-to-bot target selection when no explicit relationship weight exists.<br /><br />Default: `1.0` |
+| **proactive_bot_to_bot_relationship_weights** | Relationship-weight map used for bot-to-bot target selection. Supported key formats: `a<->b` (bidirectional), `a:b` (bidirectional), `a->b` (directional). Higher values increase how often that pair is selected.<br /><br />Default: `{"kevin<->damon":3.0, "saul<->sarah":3.0, "damon<->katherine":2.4}` |
 | **implicit_targeting_enabled** | Enables implicit recipient detection for short untagged human follow-ups (for example: `booo`, `lol`, `nah`).<br /><br />Default: `true` |
 | **implicit_targeting_window_seconds** | Max age of the most recent bot message to infer as the likely target.<br /><br />Default: `10` |
 | **implicit_targeting_max_chars** | Max message length eligible for implicit-target heuristics.<br /><br />Default: `40` |
