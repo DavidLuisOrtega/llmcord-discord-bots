@@ -180,70 +180,6 @@ def apply_generated_mention_policy(content: str, curr_config: dict[str, Any]) ->
     return cleaned
 
 
-def enforce_kevin_speech_style(content: str, curr_config: dict[str, Any]) -> str:
-    cleaned = " ".join((content or "").strip().split())
-    if cleaned == "":
-        return cleaned
-
-    word_replacements = {
-        "optimize": "fix",
-        "optimization": "fix",
-        "strategic": "solid",
-        "strategy": "plan",
-        "nuanced": "tricky",
-        "sophisticated": "fancy",
-        "complex": "messy",
-        "analyze": "check",
-        "analysis": "check",
-        "theoretical": "on paper",
-        "leverage": "use",
-        "efficient": "fast",
-        "efficiently": "fast",
-    }
-    for src, dest in word_replacements.items():
-        cleaned = re.sub(rf"\b{re.escape(src)}\b", dest, cleaned, flags=re.IGNORECASE)
-
-    if bool(curr_config.get("persona_avoid_witty_phrasing", True)):
-        witty_patterns = (
-            r"\bplot twist\b",
-            r"\bto be fair\b",
-            r"\bironically\b",
-            r"\bfrankly\b",
-            r"\badmittedly\b",
-            r"\bobjectively\b",
-            r"\blow[- ]key\b",
-            r"\bhigh[- ]key\b",
-            r"\bnuance\b",
-        )
-        for pattern in witty_patterns:
-            cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
-
-    for phrase in (curr_config.get("persona_blocklist_phrases") or []):
-        phrase_text = str(phrase).strip()
-        if phrase_text:
-            cleaned = re.sub(re.escape(phrase_text), "", cleaned, flags=re.IGNORECASE)
-
-    max_word_length = max(int(curr_config.get("persona_max_word_length", 0) or 0), 0)
-    if max_word_length > 0:
-        cleaned = re.sub(
-            rf"\b[a-zA-Z]{{{max_word_length + 1},}}\b",
-            "thing",
-            cleaned,
-        )
-
-    cleaned = cleaned.replace(";", ".")
-    cleaned = re.sub(r"\([^)]*\)", "", cleaned)
-    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip(" ,.-")
-
-    fillers = [str(item).strip() for item in (curr_config.get("persona_preferred_fillers") or []) if str(item).strip()]
-    if fillers:
-        lowered = cleaned.lower()
-        if not any(filler.lower() in lowered for filler in fillers):
-            cleaned = f"{random.choice(fillers)}, {cleaned}".strip()
-
-    return cleaned
-
-
 def deterministic_fraction(seed: str) -> float:
     digest = sha256(seed.encode("utf-8")).hexdigest()
     value = int(digest[:8], 16)
@@ -441,10 +377,6 @@ def enforce_saul_speech_style(content: str, curr_config: dict[str, Any]) -> str:
     cleaned = apply_persona_blocklist_and_length(cleaned, curr_config)
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip(" ,.-")
 
-    analytic_cues = ("pattern", "signal", "evidence", "trace", "timeline")
-    if not any(cue in cleaned.lower() for cue in analytic_cues):
-        cleaned = f"{cleaned} pattern-wise this tracks."
-
     cleaned = maybe_add_profile_filler(cleaned, curr_config, "saul")
     return cleaned
 
@@ -471,14 +403,6 @@ def enforce_katherine_speech_style(content: str, curr_config: dict[str, Any]) ->
     if cleaned == "":
         return cleaned
 
-    replacements = {
-        "build": "make",
-        "test": "try",
-        "ship": "send",
-    }
-    for src, dest in replacements.items():
-        cleaned = re.sub(rf"\b{src}\b", dest, cleaned, flags=re.IGNORECASE)
-
     cleaned = apply_persona_blocklist_and_length(cleaned, curr_config)
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip(" ,.-")
     cleaned = maybe_add_profile_filler(cleaned, curr_config, "katherine")
@@ -493,19 +417,6 @@ def enforce_damon_speech_style(content: str, curr_config: dict[str, Any]) -> str
     cleaned = apply_persona_blocklist_and_length(cleaned, curr_config)
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip(" ,.-")
     cleaned = maybe_add_profile_filler(cleaned, curr_config, "damon")
-
-    jab_chance = clamp_01(float(curr_config.get("persona_playful_jab_chance", 0.0) or 0.0))
-    if jab_chance > 0 and deterministic_fraction(f"damon:{cleaned}:jab") < jab_chance:
-        jab_bank = (
-            " no shade, but that was a spicy take.",
-            " friendly roast: that plan is chaos-adjacent.",
-            " playful jab, but you're asking for trouble there.",
-        )
-        idx = int(sha256(f"damon:{cleaned}:jab_text".encode("utf-8")).hexdigest(), 16) % len(jab_bank)
-        if not cleaned.endswith((".", "!", "?")):
-            cleaned = f"{cleaned}."
-        cleaned = f"{cleaned}{jab_bank[idx]}"
-
     return cleaned
 
 
@@ -1158,9 +1069,9 @@ async def maybe_send_proactive_starter(curr_config: dict[str, Any], redis_client
         0,
     )
     proactive_bot_to_bot_name_mode = str(curr_config.get("proactive_bot_to_bot_name_mode", "plain") or "plain").lower().strip()
-    proactive_bot_to_bot_idle_human_seconds = max(float(curr_config.get("proactive_bot_to_bot_idle_human_seconds", 3600) or 0), 0)
-    proactive_bot_to_bot_idle_channel_seconds = max(float(curr_config.get("proactive_bot_to_bot_idle_channel_seconds", 3600) or 0), 0)
-    proactive_bot_to_bot_idle_jitter_seconds = max(float(curr_config.get("proactive_bot_to_bot_idle_jitter_seconds", 600) or 0), 0)
+    proactive_bot_to_bot_idle_human_seconds = max(float(curr_config.get("proactive_bot_to_bot_idle_human_seconds", 1800) or 0), 0)
+    proactive_bot_to_bot_idle_channel_seconds = max(float(curr_config.get("proactive_bot_to_bot_idle_channel_seconds", 1800) or 0), 0)
+    proactive_bot_to_bot_idle_jitter_seconds = max(float(curr_config.get("proactive_bot_to_bot_idle_jitter_seconds", 300) or 0), 0)
     proactive_bot_to_bot_relationship_default_weight = max(
         float(curr_config.get("proactive_bot_to_bot_relationship_default_weight", 1.0) or 1.0),
         0.0,
@@ -1169,13 +1080,7 @@ async def maybe_send_proactive_starter(curr_config: dict[str, Any], redis_client
 
     last_human_ts = float(await redis_client_instance.get(f"llmcord:afk:last_human_ts:{channel_id}") or 0)
     last_any_msg_ts = float(await redis_client_instance.get(f"llmcord:channel:last_message_ts:{channel_id}") or 0)
-    if human_idle_seconds > 0 and now - last_human_ts < human_idle_seconds:
-        return
-    if channel_idle_seconds > 0 and now - last_any_msg_ts < channel_idle_seconds:
-        return
     if await redis_client_instance.get(f"llmcord:active_responder:{channel_id}"):
-        return
-    if random.random() > chance:
         return
 
     day_key = today_key(curr_config)
@@ -1184,20 +1089,6 @@ async def maybe_send_proactive_starter(curr_config: dict[str, Any], redis_client
     b2b_last_ts_key = f"llmcord:proactive:b2b:last_ts:{channel_id}"
     b2b_chain_key = f"llmcord:proactive:b2b:chain:{channel_id}"
     if max_daily > 0 and int(await redis_client_instance.get(daily_key) or 0) >= max_daily:
-        return
-
-    claim_key = f"llmcord:proactive:claim:{channel_id}"
-    claimed = await redis_client_instance.set(claim_key, get_bot_identity(), ex=claim_ttl_seconds, nx=True)
-    if not claimed:
-        return
-
-    channel = discord_bot.get_channel(channel_id)
-    if channel is None:
-        try:
-            channel = await discord_bot.fetch_channel(channel_id)
-        except (discord.NotFound, discord.HTTPException):
-            channel = None
-    if channel is None:
         return
 
     target_user_id = None
@@ -1266,6 +1157,28 @@ async def maybe_send_proactive_starter(curr_config: dict[str, Any], redis_client
             if chosen_candidate is not None:
                 target_bot_id, target_bot_name = chosen_candidate
                 is_bot_to_bot = True
+
+    if not is_bot_to_bot:
+        if human_idle_seconds > 0 and now - last_human_ts < human_idle_seconds:
+            return
+        if channel_idle_seconds > 0 and now - last_any_msg_ts < channel_idle_seconds:
+            return
+        if random.random() > chance:
+            return
+
+    claim_key = f"llmcord:proactive:claim:{channel_id}"
+    claimed = await redis_client_instance.set(claim_key, get_bot_identity(), ex=claim_ttl_seconds, nx=True)
+    if not claimed:
+        return
+
+    channel = discord_bot.get_channel(channel_id)
+    if channel is None:
+        try:
+            channel = await discord_bot.fetch_channel(channel_id)
+        except (discord.NotFound, discord.HTTPException):
+            channel = None
+    if channel is None:
+        return
 
     if not is_bot_to_bot and mention_enabled and mention_max_per_user_per_day > 0 and random.random() <= mention_chance:
         recent_humans_key = f"llmcord:channel:recent_humans:{channel_id}"
