@@ -92,10 +92,13 @@ Or run local models with:
 | **greeting_response_chance** | Optional override probability (0-1) for greeting-like messages (`hi`, `hello`, etc.) in autonomous mode.<br /><br />Default: `1.0` |
 | **response_priority_weight** | Multiplier applied to autonomous participation chance. Values over `1` make this bot more likely to join; values under `1` make it quieter.<br /><br />Default: `1.0` |
 | **bot_to_bot_response_chance_multiplier** | Multiplier applied when the triggering message author is another bot, reducing bot-to-bot chain momentum.<br /><br />Default: `0.5` |
+| **bot_to_bot_response_chance_floor** | Minimum response probability used for bot-authored trigger messages in autonomous mode. Useful for increasing bot-to-bot conversation frequency without changing human-message response rates.<br /><br />Default: `0.0` |
 | **max_consecutive_bot_turns_without_human** | Maximum consecutive bot-authored turns allowed in a channel before bots pause until a human posts.<br /><br />Default: `4` |
 | **pair_back_and_forth_cooldown_seconds** | Cooldown to discourage immediate A↔B back-and-forth loops between the same bot pair.<br /><br />Default: `60` |
 | **followup_response_chance** | After one bot has already claimed a message, probability (0-1) this bot can become the follow-up responder for that same source message.<br /><br />Default: `0.15` |
 | **max_responses_per_source_message** | Hard cap on total bot responses for one source message when Redis coordination is enabled. Set to `2` for "usually 1-2 replies".<br /><br />Default: `2` |
+| **bot_to_bot_followup_response_chance** | Follow-up probability override used when the source message author is another bot. Higher values increase bot-to-bot chatter while keeping source-message caps.<br /><br />Default: `0.3` |
+| **bot_to_bot_max_responses_per_source_message** | Source-message response cap override used for bot-authored source messages. Lets bot-to-bot exchanges run slightly longer than human-triggered turns.<br /><br />Default: `3` |
 | **source_message_window_seconds** | TTL window for tracking response count per source message in Redis.<br /><br />Default: `180` |
 | **floor_lock_ttl_seconds** | TTL for the per-channel+message floor claim lock in Redis.<br /><br />Default: `45` |
 | **active_responder_ttl_seconds** | TTL for the per-channel active responder lock while a bot is generating/typing.<br /><br />Default: `90` |
@@ -179,6 +182,14 @@ Or run local models with:
 | **discord_chat_style_enabled** | Enables output post-processing to flatten bullets/lists and keep replies chat-like.<br /><br />Default: `true` |
 | **discord_chat_max_sentences** | Maximum sentence count kept after chat-style post-processing.<br /><br />Default: `2` |
 | **discord_chat_style_max_chars** | Character cap applied by chat-style post-processing (set `0` to disable this cap).<br /><br />Default: `220` |
+| **persona_speech_enforcement_enabled** | Enables optional post-generation speech enforcement for persona-specific voice shaping. Useful when model defaults sound too polished for a character.<br /><br />Default: `false` |
+| **persona_speech_profile** | Selects the speech profile used by enforcement. Built-in profiles: `kevin`, `saul`, `sarah`, `katherine`, `damon`.<br /><br />Default: `""` |
+| **persona_avoid_witty_phrasing** | When speech enforcement is enabled, strips common witty/snarky transition phrases to keep wording more literal.<br /><br />Default: `true` |
+| **persona_max_word_length** | Replaces overly long words in enforced persona mode. Set to `0` to disable.<br /><br />Default: `0` |
+| **persona_blocklist_phrases** | Optional list of phrases removed from generated replies in enforced persona mode.<br /><br />Default: `[]` |
+| **persona_preferred_fillers** | Optional list of simple fillers (for example: `honestly`, `my gut`) that can be prefixed when absent, to reinforce persona texture.<br /><br />Default: `[]` |
+| **persona_misspell_chance** | Kevin-only option. Chance (0-1) to inject a light intentional typo so Kevin sounds less polished.<br /><br />Default: `0.0` |
+| **persona_playful_jab_chance** | Damon-only option. Chance (0-1) to append a playful jab/roast sentence.<br /><br />Default: `0.0` |
 | **use_plain_responses** | When set to `true` the bot will use plaintext responses instead of embeds. Plaintext responses have a shorter character limit so the bot's messages may split more often.<br /><br />Default: `false`<br /><br />**Also disables streamed responses and warning messages.** |
 | **allow_dms** | Set to `false` to disable direct message access.<br /><br />Default: `true` |
 | **permissions** | Configure access permissions for `users`, `roles` and `channels`, each with a list of `allowed_ids` and `blocked_ids`.<br /><br />Control which `users` are admins with `admin_ids`. Admins can change the model with `/model` and DM the bot even if `allow_dms` is `false`.<br /><br />**Leave `allowed_ids` empty to allow ALL in that category.**<br /><br />**Role and channel permissions do not affect DMs.**<br /><br />**You can use [category](https://support.discord.com/hc/en-us/articles/115001580171-Channel-Categories-101) IDs to control channel permissions in groups.** |

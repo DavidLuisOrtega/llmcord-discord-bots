@@ -180,6 +180,278 @@ def apply_generated_mention_policy(content: str, curr_config: dict[str, Any]) ->
     return cleaned
 
 
+def enforce_kevin_speech_style(content: str, curr_config: dict[str, Any]) -> str:
+    cleaned = " ".join((content or "").strip().split())
+    if cleaned == "":
+        return cleaned
+
+    word_replacements = {
+        "optimize": "fix",
+        "optimization": "fix",
+        "strategic": "solid",
+        "strategy": "plan",
+        "nuanced": "tricky",
+        "sophisticated": "fancy",
+        "complex": "messy",
+        "analyze": "check",
+        "analysis": "check",
+        "theoretical": "on paper",
+        "leverage": "use",
+        "efficient": "fast",
+        "efficiently": "fast",
+    }
+    for src, dest in word_replacements.items():
+        cleaned = re.sub(rf"\b{re.escape(src)}\b", dest, cleaned, flags=re.IGNORECASE)
+
+    if bool(curr_config.get("persona_avoid_witty_phrasing", True)):
+        witty_patterns = (
+            r"\bplot twist\b",
+            r"\bto be fair\b",
+            r"\bironically\b",
+            r"\bfrankly\b",
+            r"\badmittedly\b",
+            r"\bobjectively\b",
+            r"\blow[- ]key\b",
+            r"\bhigh[- ]key\b",
+            r"\bnuance\b",
+        )
+        for pattern in witty_patterns:
+            cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
+
+    for phrase in (curr_config.get("persona_blocklist_phrases") or []):
+        phrase_text = str(phrase).strip()
+        if phrase_text:
+            cleaned = re.sub(re.escape(phrase_text), "", cleaned, flags=re.IGNORECASE)
+
+    max_word_length = max(int(curr_config.get("persona_max_word_length", 0) or 0), 0)
+    if max_word_length > 0:
+        cleaned = re.sub(
+            rf"\b[a-zA-Z]{{{max_word_length + 1},}}\b",
+            "thing",
+            cleaned,
+        )
+
+    cleaned = cleaned.replace(";", ".")
+    cleaned = re.sub(r"\([^)]*\)", "", cleaned)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip(" ,.-")
+
+    fillers = [str(item).strip() for item in (curr_config.get("persona_preferred_fillers") or []) if str(item).strip()]
+    if fillers:
+        lowered = cleaned.lower()
+        if not any(filler.lower() in lowered for filler in fillers):
+            cleaned = f"{random.choice(fillers)}, {cleaned}".strip()
+
+    return cleaned
+
+
+def deterministic_fraction(seed: str) -> float:
+    digest = sha256(seed.encode("utf-8")).hexdigest()
+    value = int(digest[:8], 16)
+    return value / 0xFFFFFFFF
+
+
+def maybe_add_profile_filler(text: str, curr_config: dict[str, Any], profile: str) -> str:
+    fillers = [str(item).strip() for item in (curr_config.get("persona_preferred_fillers") or []) if str(item).strip()]
+    if not fillers:
+        return text
+    lowered = text.lower()
+    if any(filler.lower() in lowered for filler in fillers):
+        return text
+
+    idx_seed = f"{profile}:{text}:filler"
+    idx = int(sha256(idx_seed.encode("utf-8")).hexdigest(), 16) % len(fillers)
+    return f"{fillers[idx]}, {text}".strip()
+
+
+def apply_persona_blocklist_and_length(text: str, curr_config: dict[str, Any]) -> str:
+    cleaned = text
+    for phrase in (curr_config.get("persona_blocklist_phrases") or []):
+        phrase_text = str(phrase).strip()
+        if phrase_text:
+            cleaned = re.sub(re.escape(phrase_text), "", cleaned, flags=re.IGNORECASE)
+
+    max_word_length = max(int(curr_config.get("persona_max_word_length", 0) or 0), 0)
+    if max_word_length > 0:
+        cleaned = re.sub(
+            rf"\b[a-zA-Z]{{{max_word_length + 1},}}\b",
+            "thing",
+            cleaned,
+        )
+    return cleaned
+
+
+def enforce_kevin_speech_style(content: str, curr_config: dict[str, Any]) -> str:
+    cleaned = " ".join((content or "").strip().split())
+    if cleaned == "":
+        return cleaned
+
+    word_replacements = {
+        "optimize": "fix",
+        "optimization": "fix",
+        "strategic": "solid",
+        "strategy": "plan",
+        "nuanced": "tricky",
+        "sophisticated": "fancy",
+        "complex": "messy",
+        "analyze": "check",
+        "analysis": "check",
+        "theoretical": "on paper",
+        "leverage": "use",
+        "efficient": "fast",
+        "efficiently": "fast",
+    }
+    for src, dest in word_replacements.items():
+        cleaned = re.sub(rf"\b{re.escape(src)}\b", dest, cleaned, flags=re.IGNORECASE)
+
+    if bool(curr_config.get("persona_avoid_witty_phrasing", True)):
+        witty_patterns = (
+            r"\bplot twist\b",
+            r"\bto be fair\b",
+            r"\bironically\b",
+            r"\bfrankly\b",
+            r"\badmittedly\b",
+            r"\bobjectively\b",
+            r"\blow[- ]key\b",
+            r"\bhigh[- ]key\b",
+            r"\bnuance\b",
+        )
+        for pattern in witty_patterns:
+            cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
+
+    cleaned = apply_persona_blocklist_and_length(cleaned, curr_config)
+    cleaned = cleaned.replace(";", ".")
+    cleaned = re.sub(r"\([^)]*\)", "", cleaned)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip(" ,.-")
+    cleaned = maybe_add_profile_filler(cleaned, curr_config, "kevin")
+
+    misspell_chance = clamp_01(float(curr_config.get("persona_misspell_chance", 0.0) or 0.0))
+    if misspell_chance > 0 and deterministic_fraction(f"kevin:{cleaned}:misspell") < misspell_chance:
+        # Intentional light typo to keep Kevin sounding less polished.
+        typo_map = (
+            (r"\breally\b", "realy"),
+            (r"\bprobably\b", "probly"),
+            (r"\bbecause\b", "becuase"),
+            (r"\byou\b", "ya"),
+            (r"\babout\b", "bout"),
+        )
+        for pattern, replacement in typo_map:
+            updated = re.sub(pattern, replacement, cleaned, count=1, flags=re.IGNORECASE)
+            if updated != cleaned:
+                cleaned = updated
+                break
+
+    return cleaned
+
+
+def enforce_saul_speech_style(content: str, curr_config: dict[str, Any]) -> str:
+    cleaned = " ".join((content or "").strip().split())
+    if cleaned == "":
+        return cleaned
+
+    cleaned = re.sub(r"\b(lol|lmao|haha+)\b", "", cleaned, flags=re.IGNORECASE)
+    if bool(curr_config.get("persona_avoid_witty_phrasing", True)):
+        cleaned = re.sub(r"\b(jk|kinda|sort of|vibe|vibes|wild)\b", "", cleaned, flags=re.IGNORECASE)
+
+    cleaned = apply_persona_blocklist_and_length(cleaned, curr_config)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip(" ,.-")
+
+    analytic_cues = ("pattern", "signal", "evidence", "trace", "timeline")
+    if not any(cue in cleaned.lower() for cue in analytic_cues):
+        cleaned = f"{cleaned} pattern-wise this tracks."
+
+    cleaned = maybe_add_profile_filler(cleaned, curr_config, "saul")
+    return cleaned
+
+
+def enforce_sarah_speech_style(content: str, curr_config: dict[str, Any]) -> str:
+    cleaned = " ".join((content or "").strip().split())
+    if cleaned == "":
+        return cleaned
+
+    # Keep Sarah dry, blunt, and not risk/compliance-coded.
+    cleaned = re.sub(r"\b(risk|constraint|constraints|compliance|mitigate|tradeoff|trade-off)\b", "", cleaned, flags=re.IGNORECASE)
+    cleaned = apply_persona_blocklist_and_length(cleaned, curr_config)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip(" ,.-")
+
+    sentence_parts = [part.strip() for part in re.split(r"(?<=[.!?])\s+", cleaned) if part.strip()]
+    if sentence_parts:
+        cleaned = sentence_parts[0]
+    cleaned = maybe_add_profile_filler(cleaned, curr_config, "sarah")
+    return cleaned
+
+
+def enforce_katherine_speech_style(content: str, curr_config: dict[str, Any]) -> str:
+    cleaned = " ".join((content or "").strip().split())
+    if cleaned == "":
+        return cleaned
+
+    replacements = {
+        "build": "make",
+        "test": "try",
+        "ship": "send",
+    }
+    for src, dest in replacements.items():
+        cleaned = re.sub(rf"\b{src}\b", dest, cleaned, flags=re.IGNORECASE)
+
+    cleaned = apply_persona_blocklist_and_length(cleaned, curr_config)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip(" ,.-")
+    cleaned = maybe_add_profile_filler(cleaned, curr_config, "katherine")
+    return cleaned
+
+
+def enforce_damon_speech_style(content: str, curr_config: dict[str, Any]) -> str:
+    cleaned = " ".join((content or "").strip().split())
+    if cleaned == "":
+        return cleaned
+
+    cleaned = apply_persona_blocklist_and_length(cleaned, curr_config)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip(" ,.-")
+    cleaned = maybe_add_profile_filler(cleaned, curr_config, "damon")
+
+    jab_chance = clamp_01(float(curr_config.get("persona_playful_jab_chance", 0.0) or 0.0))
+    if jab_chance > 0 and deterministic_fraction(f"damon:{cleaned}:jab") < jab_chance:
+        jab_bank = (
+            " no shade, but that was a spicy take.",
+            " friendly roast: that plan is chaos-adjacent.",
+            " playful jab, but you're asking for trouble there.",
+        )
+        idx = int(sha256(f"damon:{cleaned}:jab_text".encode("utf-8")).hexdigest(), 16) % len(jab_bank)
+        if not cleaned.endswith((".", "!", "?")):
+            cleaned = f"{cleaned}."
+        cleaned = f"{cleaned}{jab_bank[idx]}"
+
+    return cleaned
+
+
+def apply_persona_speech_enforcement(content: str, curr_config: dict[str, Any]) -> str:
+    if content == "":
+        return content
+    if not bool(curr_config.get("persona_speech_enforcement_enabled", False)):
+        return content
+
+    profile = str(curr_config.get("persona_speech_profile", "") or "").strip().lower()
+    if profile == "kevin":
+        return enforce_kevin_speech_style(content, curr_config)
+    if profile == "saul":
+        return enforce_saul_speech_style(content, curr_config)
+    if profile == "sarah":
+        return enforce_sarah_speech_style(content, curr_config)
+    if profile == "katherine":
+        return enforce_katherine_speech_style(content, curr_config)
+    if profile == "damon":
+        return enforce_damon_speech_style(content, curr_config)
+    if profile == "":
+        return content
+
+    return apply_persona_blocklist_and_length(content, curr_config)
+
+
+def format_visible_content(content: str, curr_config: dict[str, Any]) -> str:
+    visible = apply_generated_mention_policy(content, curr_config)
+    visible = apply_persona_speech_enforcement(visible, curr_config)
+    return visible
+
+
 def pick_mood(curr_config: dict[str, Any], now: datetime) -> Optional[str]:
     if not curr_config.get("mood_injector_enabled", False):
         return None
@@ -227,6 +499,9 @@ def build_system_prompt_for_model(curr_config: dict[str, Any], accept_usernames:
             " Keep replies terse, playful, and conversational, usually 1-2 short sentences."
             " lowercase and imperfect punctuation are fine."
             " If asked for depth, give a short take first and expand only if asked."
+            " Stay anchored to the user's most recent topic and read the room."
+            " Don't pivot to unrelated projects, prototypes, or tangents unless invited."
+            " When a user shares a photo or scene, respond to what they shared first and ask one relevant follow-up before changing topics."
         )
 
     if accept_usernames:
@@ -1325,6 +1600,8 @@ async def on_message(new_msg: discord.Message) -> None:
                 effective_chance = clamp_01(effective_chance * response_priority_weight)
                 if new_msg.author.bot:
                     effective_chance = clamp_01(effective_chance * bot_to_bot_response_chance_multiplier)
+                    bot_to_bot_response_chance_floor = clamp_01(float(config.get("bot_to_bot_response_chance_floor", 0.0) or 0.0))
+                    effective_chance = max(effective_chance, bot_to_bot_response_chance_floor)
                 should_process = random.random() < effective_chance
         else:
             should_process = has_direct_mention or is_direct_reply or is_implicit_target_for_this_bot
@@ -1518,6 +1795,14 @@ async def on_message(new_msg: discord.Message) -> None:
             source_message_window_seconds = max(int(float(config.get("source_message_window_seconds", 180) or 180)), 30)
             max_responses_per_source_message = max(int(float(config.get("max_responses_per_source_message", 2) or 2)), 1)
             followup_response_chance = clamp_01(float(config.get("followup_response_chance", 0.15) or 0.15))
+            if new_msg.author.bot:
+                max_responses_per_source_message = max(
+                    int(float(config.get("bot_to_bot_max_responses_per_source_message", max_responses_per_source_message) or max_responses_per_source_message)),
+                    1,
+                )
+                followup_response_chance = clamp_01(
+                    float(config.get("bot_to_bot_followup_response_chance", followup_response_chance) or followup_response_chance)
+                )
             floor_lock_key = f"llmcord:floor:{channel_id}:{source_message_id}"
             source_count_key = f"llmcord:source_count:{channel_id}:{source_message_id}"
             active_responder_key = f"llmcord:active_responder:{channel_id}"
@@ -1725,7 +2010,7 @@ async def on_message(new_msg: discord.Message) -> None:
                     is_good_finish = finish_reason != None and finish_reason.lower() in ("stop", "end_turn")
 
                     if start_next_msg or ready_to_edit or is_final_edit:
-                        visible_content = apply_generated_mention_policy(response_contents[-1], config)
+                        visible_content = format_visible_content(response_contents[-1], config)
                         embed.description = visible_content if is_final_edit else (visible_content + STREAMING_INDICATOR)
                         embed.color = EMBED_COLOR_COMPLETE if msg_split_incoming or is_good_finish else EMBED_COLOR_INCOMPLETE
 
@@ -1739,7 +2024,7 @@ async def on_message(new_msg: discord.Message) -> None:
 
             if use_plain_responses:
                 for content in response_contents:
-                    visible_content = apply_generated_mention_policy(content, config)
+                    visible_content = format_visible_content(content, config)
                     await reply_helper(view=LayoutView().add_item(TextDisplay(content=visible_content)))
 
     except Exception:
@@ -1764,7 +2049,7 @@ async def on_message(new_msg: discord.Message) -> None:
                 except RedisError:
                     logging.exception("Failed to roll back Redis source response count")
 
-    final_text = apply_generated_mention_policy("".join(response_contents), config)
+    final_text = format_visible_content("".join(response_contents), config)
     if response_msgs:
         await maybe_send_curated_gif_reply(
             trigger_msg=new_msg,

@@ -18,10 +18,13 @@ group_response_chance: 1.0
 greeting_response_chance: 1.0
 response_priority_weight: 1.0
 bot_to_bot_response_chance_multiplier: 0.5
+bot_to_bot_response_chance_floor: 0.0
 max_consecutive_bot_turns_without_human: 4
 pair_back_and_forth_cooldown_seconds: 60
 followup_response_chance: 0.15
 max_responses_per_source_message: 2
+bot_to_bot_followup_response_chance: 0.3
+bot_to_bot_max_responses_per_source_message: 3
 source_message_window_seconds: 180
 floor_lock_ttl_seconds: 45
 active_responder_ttl_seconds: 90
@@ -131,6 +134,14 @@ discord_chat_global_style_prompt_enabled: true
 discord_chat_style_enabled: true
 discord_chat_max_sentences: 2
 discord_chat_style_max_chars: 220
+persona_speech_enforcement_enabled: false
+persona_speech_profile: ""  # Supported: kevin, saul, sarah, katherine, damon
+persona_avoid_witty_phrasing: true
+persona_max_word_length: 0  # 0 disables long-word replacement
+persona_blocklist_phrases: []
+persona_preferred_fillers: []
+persona_misspell_chance: 0.0  # Kevin profile only. Chance to add a light typo.
+persona_playful_jab_chance: 0.0  # Damon profile only. Chance to append playful jab.
 
 use_plain_responses: false
 allow_dms: true
