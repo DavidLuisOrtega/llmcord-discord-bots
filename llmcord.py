@@ -76,6 +76,7 @@ redis_client = None
 redis_client_url = None
 redis_client_lock = asyncio.Lock()
 afk_scheduler_task = None
+dm_checkin_task = None
 
 
 def get_bot_identity() -> str:
@@ -147,6 +148,21 @@ def message_looks_open_ended(content: str) -> bool:
         "ideas",
     )
     return any(normalized.startswith(prefix) for prefix in prefixes)
+
+
+def message_requests_dm(content: str) -> bool:
+    normalized = " ".join(content.lower().split())
+    if not normalized:
+        return False
+    dm_phrases = (
+        "dm me", "dm this", "send me a dm", "send a dm",
+        "pm me", "pm this", "send me a pm",
+        "message me", "message me privately",
+        "send it privately", "tell me privately",
+        "in my dms", "in dms", "slide into my dms",
+        "privately", "in private",
+    )
+    return any(phrase in normalized for phrase in dm_phrases)
 
 
 def apply_generated_mention_policy(content: str, curr_config: dict[str, Any]) -> str:
@@ -1549,6 +1565,7 @@ async def maybe_schedule_afk_followup(new_msg: discord.Message, curr_config: dic
             channel_id=str(channel_id),
             source_message_id=str(source_message_id),
             source_human_ts=str(source_human_ts),
+            source_user_id=str(new_msg.author.id),
             followups_sent="0",
             next_followup_index="0",
             max_followups=str(max_followups),
@@ -1644,11 +1661,27 @@ async def process_afk_followup_item(item_id: str, curr_config: dict[str, Any], r
         await redis_client_instance.delete(item_hash_key)
         return
 
-    try:
-        await channel.send(followup_text, silent=True)
-    except (discord.NotFound, discord.HTTPException):
-        await redis_client_instance.zadd(schedule_zset_key, {item_id: now_ts() + 120})
-        return
+    dm_followup_enabled = bool(curr_config.get("dm_followup_enabled", False))
+    dm_followup_chance = clamp_01(float(curr_config.get("dm_followup_chance", 0.3) or 0.3))
+    source_user_id_str = item.get("source_user_id", "")
+    sent_via_dm = False
+
+    if dm_followup_enabled and source_user_id_str and random.random() <= dm_followup_chance:
+        try:
+            user = await discord_bot.fetch_user(int(source_user_id_str))
+            if user is not None:
+                await user.send(followup_text)
+                sent_via_dm = True
+                logging.info("[afk-dm:%s] sent DM to user %s", get_bot_identity(), source_user_id_str)
+        except (discord.Forbidden, discord.NotFound, discord.HTTPException) as exc:
+            logging.debug("[afk-dm:%s] DM failed for user %s: %s", get_bot_identity(), source_user_id_str, exc)
+
+    if not sent_via_dm:
+        try:
+            await channel.send(followup_text, silent=True)
+        except (discord.NotFound, discord.HTTPException):
+            await redis_client_instance.zadd(schedule_zset_key, {item_id: now_ts() + 120})
+            return
 
     followups_sent += 1
     next_followup_index += 1
@@ -1661,6 +1694,180 @@ async def process_afk_followup_item(item_id: str, curr_config: dict[str, Any], r
             mapping=dict(followups_sent=str(followups_sent), next_followup_index=str(next_followup_index)),
         )
         await redis_client_instance.zadd(schedule_zset_key, {item_id: source_human_ts + delays[next_followup_index]})
+
+
+async def generate_dm_checkin_text(curr_config: dict[str, Any], target_user_id: int, max_chars: int) -> str:
+    provider_slash_model = curr_model
+    provider, model = provider_slash_model.removesuffix(":vision").split("/", 1)
+    provider_config = curr_config["providers"][provider]
+    openai_client = AsyncOpenAI(base_url=provider_config["base_url"], api_key=provider_config.get("api_key", "sk-no-key-required"))
+
+    model_parameters = curr_config["models"].get(provider_slash_model, None)
+    extra_headers = provider_config.get("extra_headers")
+    extra_query = provider_config.get("extra_query")
+    extra_body = (provider_config.get("extra_body") or {}) | (model_parameters or {}) or None
+
+    accept_usernames = any(provider_slash_model.lower().startswith(x) for x in PROVIDERS_SUPPORTING_USERNAMES)
+    system_prompt = build_system_prompt_for_model(curr_config, accept_usernames)
+
+    user_instruction = (
+        "Write exactly one short casual DM (direct message) to a friend you haven't talked to in a bit. "
+        "This is a private one-on-one message, not a group chat. Be warm, personal, and low-pressure. "
+        f"Keep it under {max_chars} characters, one sentence, no lists, no markdown, no hashtags. "
+        "Examples of good DMs: 'hey whats up, haven't seen you in a bit', "
+        "'yo just thinking about that thing you said earlier lol', "
+        "'dude you good? been quiet'. Do NOT use any @mentions or mention syntax."
+    )
+
+    messages: list[dict[str, str]] = [dict(role="user", content=user_instruction)]
+    if system_prompt:
+        messages.append(dict(role="system", content=system_prompt))
+
+    try:
+        response = await openai_client.chat.completions.create(
+            model=model,
+            messages=messages[::-1],
+            stream=False,
+            extra_headers=extra_headers,
+            extra_query=extra_query,
+            extra_body=extra_body,
+        )
+    except Exception:
+        logging.exception("Error generating DM check-in text")
+        return ""
+
+    content = ""
+    if response.choices:
+        message_content = response.choices[0].message.content
+        if isinstance(message_content, str):
+            content = message_content
+        elif isinstance(message_content, list):
+            content = "".join(
+                part.get("text", "") for part in message_content if isinstance(part, dict) and part.get("type") == "text"
+            )
+
+    content = apply_generated_mention_policy(content, curr_config)
+    content = apply_persona_speech_enforcement(content, curr_config)
+
+    if len(content) > max_chars:
+        content = content[:max_chars].rsplit(" ", 1)[0]
+    return content.strip()
+
+
+async def maybe_send_dm_checkin(curr_config: dict[str, Any], redis_client_instance) -> None:
+    if not curr_config.get("dm_checkin_enabled", False):
+        return
+    if curr_config.get("dm_checkin_respect_quiet_hours", True) and in_quiet_hours(curr_config):
+        return
+
+    bot_tag = get_bot_identity()
+    own_id = discord_bot.user.id if discord_bot.user else None
+    if own_id is None:
+        return
+
+    now = now_ts()
+    day_key = today_key(curr_config)
+
+    dm_chance = clamp_01(float(curr_config.get("dm_checkin_chance", 0.15) or 0.15))
+    if random.random() > dm_chance:
+        return
+
+    cooldown_seconds = max(float(curr_config.get("dm_checkin_cooldown_seconds", 3600) or 0), 0)
+    last_dm_ts_key = f"llmcord:dm:last_ts:{own_id}"
+    last_dm_ts = float(await redis_client_instance.get(last_dm_ts_key) or 0)
+    if cooldown_seconds > 0 and now - last_dm_ts < cooldown_seconds:
+        return
+
+    max_per_bot_per_user = max(int(float(curr_config.get("dm_checkin_max_per_bot_per_user_per_day", 2) or 2)), 0)
+    max_global_per_user = max(int(float(curr_config.get("dm_checkin_max_global_per_user_per_day", 4) or 4)), 0)
+    recent_human_seconds = max(float(curr_config.get("dm_checkin_recent_human_seconds", 172800) or 0), 0)
+    dm_max_chars = max(int(float(curr_config.get("dm_checkin_max_chars", 150) or 150)), 40)
+
+    observed_channels = {int(x) for x in await redis_client_instance.smembers("llmcord:observed_channels")}
+    candidate_user_ids: set[int] = set()
+    min_recent_ts = now - recent_human_seconds if recent_human_seconds > 0 else 0
+    for ch_id in observed_channels:
+        humans = await redis_client_instance.zrevrangebyscore(
+            f"llmcord:channel:recent_humans:{ch_id}", max="+inf", min=min_recent_ts, start=0, num=25,
+        )
+        for uid_str in humans:
+            try:
+                uid = int(uid_str)
+                if uid != own_id:
+                    candidate_user_ids.add(uid)
+            except ValueError:
+                continue
+
+    if not candidate_user_ids:
+        return
+
+    candidate_list = list(candidate_user_ids)
+    random.shuffle(candidate_list)
+
+    for target_user_id in candidate_list:
+        bot_daily_key = f"llmcord:dm:daily:{own_id}:{target_user_id}:{day_key}"
+        bot_daily_count = int(await redis_client_instance.get(bot_daily_key) or 0)
+        if max_per_bot_per_user > 0 and bot_daily_count >= max_per_bot_per_user:
+            continue
+
+        global_daily_key = f"llmcord:dm:global_daily:{target_user_id}:{day_key}"
+        global_daily_count = int(await redis_client_instance.get(global_daily_key) or 0)
+        if max_global_per_user > 0 and global_daily_count >= max_global_per_user:
+            continue
+
+        claim_key = f"llmcord:dm:claim:{target_user_id}"
+        claimed = await redis_client_instance.set(claim_key, bot_tag, ex=60, nx=True)
+        if not claimed:
+            continue
+
+        dm_text = await generate_dm_checkin_text(curr_config, target_user_id, dm_max_chars)
+        if not dm_text:
+            logging.info("[dm-checkin:%s] generation failed for user %s", bot_tag, target_user_id)
+            return
+
+        try:
+            user = await discord_bot.fetch_user(target_user_id)
+            if user is None:
+                continue
+            await user.send(dm_text)
+            logging.info("[dm-checkin:%s] sent DM to %s: %s", bot_tag, target_user_id, dm_text[:60])
+        except (discord.Forbidden, discord.NotFound, discord.HTTPException) as exc:
+            logging.debug("[dm-checkin:%s] DM failed for user %s: %s", bot_tag, target_user_id, exc)
+            continue
+
+        ttl = 3 * 24 * 3600
+        new_bot_daily = await redis_client_instance.incr(bot_daily_key)
+        if new_bot_daily == 1:
+            await redis_client_instance.expire(bot_daily_key, ttl)
+        new_global_daily = await redis_client_instance.incr(global_daily_key)
+        if new_global_daily == 1:
+            await redis_client_instance.expire(global_daily_key, ttl)
+        await redis_client_instance.set(last_dm_ts_key, now, ex=7 * 24 * 3600)
+        return
+
+    logging.debug("[dm-checkin:%s] no eligible DM targets", bot_tag)
+
+
+async def dm_checkin_scheduler_loop() -> None:
+    while True:
+        try:
+            curr_config = await asyncio.to_thread(get_config)
+            poll_seconds = max(float(curr_config.get("dm_checkin_poll_seconds", 30) or 30), 5)
+            redis_client_instance = await get_redis_client(curr_config)
+
+            if redis_client_instance is None:
+                await asyncio.sleep(poll_seconds)
+                continue
+
+            if curr_config.get("dm_checkin_enabled", False):
+                await maybe_send_dm_checkin(curr_config, redis_client_instance)
+
+            await asyncio.sleep(poll_seconds + random.uniform(0, 5))
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logging.exception("Error in DM check-in scheduler")
+            await asyncio.sleep(10)
 
 
 async def afk_followup_scheduler_loop() -> None:
@@ -1758,7 +1965,7 @@ async def model_autocomplete(interaction: discord.Interaction, curr_str: str) ->
 
 @discord_bot.event
 async def on_ready() -> None:
-    global afk_scheduler_task
+    global afk_scheduler_task, dm_checkin_task
 
     if client_id := config.get("client_id"):
         logging.info(f"\n\nBOT INVITE URL:\nhttps://discord.com/oauth2/authorize?client_id={client_id}&permissions=412317191168&scope=bot\n")
@@ -1767,6 +1974,9 @@ async def on_ready() -> None:
 
     if afk_scheduler_task is None or afk_scheduler_task.done():
         afk_scheduler_task = asyncio.create_task(afk_followup_scheduler_loop())
+
+    if dm_checkin_task is None or dm_checkin_task.done():
+        dm_checkin_task = asyncio.create_task(dm_checkin_scheduler_loop())
 
 
 @discord_bot.event
@@ -2323,6 +2533,17 @@ async def on_message(new_msg: discord.Message) -> None:
                     logging.exception("Failed to roll back Redis source response count")
 
     final_text = format_visible_content("".join(response_contents), config)
+
+    if response_msgs and not is_dm and not new_msg.author.bot and message_requests_dm(new_msg.content):
+        try:
+            dm_user = await discord_bot.fetch_user(new_msg.author.id)
+            if dm_user is not None:
+                dm_text = final_text[:1900] if len(final_text) > 1900 else final_text
+                await dm_user.send(dm_text)
+                logging.info("[dm-request:%s] sent DM to %s", get_bot_identity(), new_msg.author.id)
+        except (discord.Forbidden, discord.NotFound, discord.HTTPException) as exc:
+            logging.debug("[dm-request:%s] DM failed: %s", get_bot_identity(), exc)
+
     if response_msgs:
         await maybe_send_curated_gif_reply(
             trigger_msg=new_msg,

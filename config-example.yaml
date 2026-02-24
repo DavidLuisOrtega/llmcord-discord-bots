@@ -45,6 +45,22 @@ afk_followup_max_chars: 140
 afk_followup_fallback_text: ""  # Optional. Leave empty to skip AFK follow-up when generation fails.
 afk_cancel_on_any_human_message: true
 afk_scheduler_poll_seconds: 5
+
+# DM follow-up (sends AFK follow-ups as DMs instead of channel messages):
+dm_followup_enabled: false
+dm_followup_chance: 0.3  # Probability of sending as DM vs channel message
+
+# DM check-in (proactive casual DMs to recent humans):
+dm_checkin_enabled: false
+dm_checkin_chance: 0.15  # Per poll cycle probability
+dm_checkin_cooldown_seconds: 3600  # Min seconds between DMs from same bot
+dm_checkin_max_per_bot_per_user_per_day: 2
+dm_checkin_max_global_per_user_per_day: 4  # Across all bots
+dm_checkin_recent_human_seconds: 172800  # Only DM humans active within 48h
+dm_checkin_max_chars: 150
+dm_checkin_respect_quiet_hours: true
+dm_checkin_poll_seconds: 30
+
 quiet_hours_enabled: false
 quiet_hours_timezone: "UTC"
 quiet_hours_start_hour: 23
