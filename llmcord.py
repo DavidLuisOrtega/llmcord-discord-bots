@@ -321,9 +321,64 @@ def enforce_kevin_speech_style(content: str, curr_config: dict[str, Any]) -> str
         "leverage": "use",
         "efficient": "fast",
         "efficiently": "fast",
+        "terminal": "screen",
+        "console": "screen",
+        "interface": "thing",
+        "dashboard": "screen",
+        "configured": "set up",
+        "configuration": "setup",
+        "connected": "hooked up",
+        "connection": "hook up",
+        "booted": "turned on",
+        "rebooted": "turned back on",
+        "monitor": "screen",
+        "monitoring": "watching",
+        "server": "computer",
+        "database": "computer stuff",
+        "repository": "folder",
+        "deployed": "put up",
+        "deployment": "setup",
+        "protocol": "thing",
+        "architecture": "layout",
+        "infrastructure": "setup",
+        "implementation": "the thing",
+        "functionality": "the stuff",
+        "essentially": "basically",
+        "particularly": "especially",
+        "comprehensive": "big",
+        "subsequently": "then",
+        "furthermore": "also",
+        "nevertheless": "still",
+        "alternatively": "or",
+        "significantly": "a lot",
+        "approximately": "about",
+        "unfortunately": "sucks but",
+        "simultaneously": "at the same time",
     }
     for src, dest in word_replacements.items():
         cleaned = re.sub(rf"\b{re.escape(src)}\b", dest, cleaned, flags=re.IGNORECASE)
+
+    tech_jargon_strip = (
+        r"\bIRC\b", r"\bAPI\b", r"\bCLI\b", r"\bSSH\b", r"\bDNS\b",
+        r"\bHTTP[S]?\b", r"\bSQL\b", r"\bJSON\b", r"\bYAML\b", r"\bCSS\b",
+        r"\bHTML\b", r"\bregex\b", r"\bbash\b", r"\bpython\b", r"\brust\b",
+        r"\bdocker\b", r"\bnginx\b", r"\bredis\b", r"\bgit\b", r"\bnpm\b",
+        r"\bwebsocket\b", r"\bfirewall\b", r"\bscript(?:s|ed|ing)?\b",
+        r"\bcompil(?:e[rd]?|ing)\b", r"\bruntime\b", r"\bframework\b",
+        r"\bsyntax\b", r"\bparsing\b", r"\bparser\b",
+        r"\bencrypt(?:ed|ion)?\b", r"\bdecrypt(?:ed|ion)?\b",
+        r"\balgorithm\b", r"\blatency\b", r"\bbandwidth\b",
+        r"\bthroughput\b", r"\bpipeline\b", r"\bsandbox\b",
+        r"\bkernel\b", r"\bdaemon\b", r"\bsocket\b",
+        r"\bfreenode\b", r"\bweechat\b", r"\bhighlight\b",
+        r"\bvim\b", r"\bemacs\b",
+    )
+    for pattern in tech_jargon_strip:
+        cleaned = re.sub(pattern, "stuff", cleaned, count=1, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bstuff stuff\b", "stuff", cleaned, flags=re.IGNORECASE)
+
+    cleaned = re.sub(r"\b\w+\.\w+\.(com|net|org|io|dev|gg)\b", "some website", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bhttps?://\S+", "some link", cleaned, flags=re.IGNORECASE)
 
     if bool(curr_config.get("persona_avoid_witty_phrasing", True)):
         witty_patterns = (
@@ -336,11 +391,19 @@ def enforce_kevin_speech_style(content: str, curr_config: dict[str, Any]) -> str
             r"\blow[- ]key\b",
             r"\bhigh[- ]key\b",
             r"\bnuance\b",
+            r"\bintriguingly\b",
+            r"\bcuriously\b",
+            r"\btechnically speaking\b",
+            r"\bin essence\b",
+            r"\bfundamentally\b",
         )
         for pattern in witty_patterns:
             cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
 
     cleaned = apply_persona_blocklist_and_length(cleaned, curr_config)
+
+    cleaned = cleaned.replace("\u2014", ",")
+    cleaned = cleaned.replace("\u2013", ",")
     cleaned = cleaned.replace(";", ".")
     cleaned = re.sub(r"\([^)]*\)", "", cleaned)
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip(" ,.-")
@@ -348,13 +411,17 @@ def enforce_kevin_speech_style(content: str, curr_config: dict[str, Any]) -> str
 
     misspell_chance = clamp_01(float(curr_config.get("persona_misspell_chance", 0.0) or 0.0))
     if misspell_chance > 0 and deterministic_fraction(f"kevin:{cleaned}:misspell") < misspell_chance:
-        # Intentional light typo to keep Kevin sounding less polished.
         typo_map = (
             (r"\breally\b", "realy"),
             (r"\bprobably\b", "probly"),
             (r"\bbecause\b", "becuase"),
             (r"\byou\b", "ya"),
             (r"\babout\b", "bout"),
+            (r"\bsomething\b", "somethin"),
+            (r"\bnothing\b", "nothin"),
+            (r"\bgoing\b", "goin"),
+            (r"\bwant\b", "wan"),
+            (r"\bthough\b", "tho"),
         )
         for pattern, replacement in typo_map:
             updated = re.sub(pattern, replacement, cleaned, count=1, flags=re.IGNORECASE)
@@ -370,12 +437,29 @@ def enforce_saul_speech_style(content: str, curr_config: dict[str, Any]) -> str:
     if cleaned == "":
         return cleaned
 
-    cleaned = re.sub(r"\b(lol|lmao|haha+)\b", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b(lol|lmao|haha+|hype|dope|sick|fire)\b", "", cleaned, flags=re.IGNORECASE)
     if bool(curr_config.get("persona_avoid_witty_phrasing", True)):
-        cleaned = re.sub(r"\b(jk|kinda|sort of|vibe|vibes|wild)\b", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\b(jk|kinda|sort of|vibe|vibes|wild|tbh|ngl|fr|no cap)\b", "", cleaned, flags=re.IGNORECASE)
+
+    formal_strip = (
+        r"\bfurthermore\b", r"\bmoreover\b", r"\bnevertheless\b",
+        r"\bhowever\b", r"\bconsequently\b", r"\badditionally\b",
+    )
+    for pattern in formal_strip:
+        cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
 
     cleaned = apply_persona_blocklist_and_length(cleaned, curr_config)
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip(" ,.-")
+
+    cleaned = cleaned.lower()
+
+    cleaned = re.sub(r"[.]{2,}", "...", cleaned)
+    cleaned = re.sub(r"\.\s+", "... ", cleaned)
+    if cleaned and not cleaned.endswith("...") and not cleaned.endswith("?"):
+        cleaned = cleaned.rstrip(".!,") + "..."
+
+    cleaned = re.sub(r"!\s*", "... ", cleaned)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip()
 
     cleaned = maybe_add_profile_filler(cleaned, curr_config, "saul")
     return cleaned
@@ -386,14 +470,44 @@ def enforce_sarah_speech_style(content: str, curr_config: dict[str, Any]) -> str
     if cleaned == "":
         return cleaned
 
-    # Keep Sarah dry, blunt, and not risk/compliance-coded.
     cleaned = re.sub(r"\b(risk|constraint|constraints|compliance|mitigate|tradeoff|trade-off)\b", "", cleaned, flags=re.IGNORECASE)
+
+    enthusiastic_strip = (
+        r"\bamazing\b", r"\bawesome\b", r"\bincredible\b", r"\bfantastic\b",
+        r"\bwonderful\b", r"\bexciting\b", r"\bexcited\b", r"\bbrilliant\b",
+        r"\blove it\b", r"\blove this\b", r"\bso cool\b", r"\bgreat idea\b",
+    )
+    for pattern in enthusiastic_strip:
+        cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
+
+    formal_strip = (
+        r"\bfurthermore\b", r"\bmoreover\b", r"\bnevertheless\b",
+        r"\bconsequently\b", r"\badditionally\b", r"\bsignificantly\b",
+        r"\bfundamentally\b", r"\bessentially\b",
+    )
+    for pattern in formal_strip:
+        cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
+
     cleaned = apply_persona_blocklist_and_length(cleaned, curr_config)
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip(" ,.-")
 
     sentence_parts = [part.strip() for part in re.split(r"(?<=[.!?])\s+", cleaned) if part.strip()]
     if sentence_parts:
         cleaned = sentence_parts[0]
+
+    cleaned = cleaned.lower()
+
+    cleaned = cleaned.replace("!", ".")
+    cleaned = re.sub(r"[.]{2,}", ".", cleaned)
+
+    allowed_emoji = {"💀", "🙄"}
+    cleaned = re.sub(
+        r"[\U0001F600-\U0001F64F\U0001F300-\U0001F5FF\U0001F680-\U0001F6FF\U0001F900-\U0001F9FF\U0001FA00-\U0001FA6F\U0001FA70-\U0001FAFF\U00002702-\U000027B0\U0000FE00-\U0000FE0F\U0001F1E0-\U0001F1FF]",
+        lambda m: m.group() if m.group() in allowed_emoji else "",
+        cleaned,
+    )
+
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip(" ,.-")
     cleaned = maybe_add_profile_filler(cleaned, curr_config, "sarah")
     return cleaned
 
@@ -402,6 +516,40 @@ def enforce_katherine_speech_style(content: str, curr_config: dict[str, Any]) ->
     cleaned = " ".join((content or "").strip().split())
     if cleaned == "":
         return cleaned
+
+    word_replacements = {
+        "think about": "diagnose",
+        "look into": "check",
+        "beautiful": "solid",
+        "amazing": "solid",
+        "wonderful": "decent",
+        "incredible": "legit",
+        "fantastic": "solid",
+        "awesome": "nice",
+        "perhaps": "maybe",
+        "utilize": "use",
+        "regarding": "about",
+        "concerning": "about",
+        "facilitate": "run",
+        "implement": "wire up",
+        "problematic": "busted",
+        "malfunction": "busted",
+        "broken": "fried",
+        "issue": "snag",
+        "difficulty": "snag",
+        "examine": "poke at",
+        "investigate": "dig into",
+    }
+    for src, dest in word_replacements.items():
+        cleaned = re.sub(rf"\b{re.escape(src)}\b", dest, cleaned, flags=re.IGNORECASE)
+
+    formal_strip = (
+        r"\bfurthermore\b", r"\bmoreover\b", r"\bnevertheless\b",
+        r"\bconsequently\b", r"\bsignificantly\b", r"\bfundamentally\b",
+        r"\bessentially\b", r"\btheoretically\b", r"\brespectfully\b",
+    )
+    for pattern in formal_strip:
+        cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
 
     cleaned = apply_persona_blocklist_and_length(cleaned, curr_config)
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip(" ,.-")
@@ -414,7 +562,59 @@ def enforce_damon_speech_style(content: str, curr_config: dict[str, Any]) -> str
     if cleaned == "":
         return cleaned
 
+    formal_strip = (
+        r"\bhowever\b", r"\bfurthermore\b", r"\bmoreover\b",
+        r"\bnevertheless\b", r"\bconsequently\b", r"\badditionally\b",
+        r"\bsignificantly\b", r"\btherefore\b", r"\bin conclusion\b",
+        r"\brespectfully\b", r"\baccordingly\b",
+    )
+    for pattern in formal_strip:
+        cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
+
+    word_replacements = {
+        "interesting": "wild",
+        "fascinating": "insane",
+        "beautiful": "fire",
+        "wonderful": "sick",
+        "excellent": "elite",
+        "important": "massive",
+        "understand": "get",
+        "certainly": "obviously",
+        "perhaps": "maybe",
+        "regarding": "about",
+        "utilize": "use",
+        "unfortunately": "rip",
+        "correct": "based",
+        "absolutely": "literally",
+    }
+    for src, dest in word_replacements.items():
+        cleaned = re.sub(rf"\b{re.escape(src)}\b", dest, cleaned, flags=re.IGNORECASE)
+
     cleaned = apply_persona_blocklist_and_length(cleaned, curr_config)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip(" ,.-")
+
+    cleaned = cleaned.lower()
+
+    article_seed = f"damon:{cleaned}:articles"
+    if deterministic_fraction(article_seed) < 0.3:
+        cleaned = re.sub(r"\bthe\s+", "", cleaned, count=1)
+        cleaned = re.sub(r"\ba\s+", "", cleaned, count=1)
+
+    jab_chance = clamp_01(float(curr_config.get("persona_playful_jab_chance", 0.0) or 0.0))
+    if jab_chance > 0 and deterministic_fraction(f"damon:{cleaned}:jab") < jab_chance:
+        jab_seed = int(deterministic_fraction(f"damon:{cleaned}:jab_pick") * 1000)
+        jab_pool = [
+            "but what do i know",
+            "not that anyone asked",
+            "chaos reigns",
+            "just saying",
+            "don't @ me",
+            "respectfully unhinged take",
+            "fight me on this",
+        ]
+        jab = jab_pool[jab_seed % len(jab_pool)]
+        cleaned = f"{cleaned}, {jab}"
+
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip(" ,.-")
     cleaned = maybe_add_profile_filler(cleaned, curr_config, "damon")
     return cleaned
@@ -1038,9 +1238,11 @@ async def generate_afk_followup_text(curr_config: dict[str, Any], max_chars: int
 
 
 async def maybe_send_proactive_starter(curr_config: dict[str, Any], redis_client_instance, channel_id: int) -> None:
+    bot_tag = get_bot_identity()
     if not curr_config.get("proactive_starters_enabled", False):
         return
     if in_quiet_hours(curr_config) and curr_config.get("proactive_respect_quiet_hours", True):
+        logging.debug("[proactive:%s:%s] blocked by quiet hours", bot_tag, channel_id)
         return
 
     now = now_ts()
@@ -1080,7 +1282,11 @@ async def maybe_send_proactive_starter(curr_config: dict[str, Any], redis_client
 
     last_human_ts = float(await redis_client_instance.get(f"llmcord:afk:last_human_ts:{channel_id}") or 0)
     last_any_msg_ts = float(await redis_client_instance.get(f"llmcord:channel:last_message_ts:{channel_id}") or 0)
+    human_idle = now - last_human_ts if last_human_ts > 0 else float("inf")
+    channel_idle = now - last_any_msg_ts if last_any_msg_ts > 0 else float("inf")
+
     if await redis_client_instance.get(f"llmcord:active_responder:{channel_id}"):
+        logging.debug("[proactive:%s:%s] blocked by active_responder lock", bot_tag, channel_id)
         return
 
     day_key = today_key(curr_config)
@@ -1088,7 +1294,9 @@ async def maybe_send_proactive_starter(curr_config: dict[str, Any], redis_client
     b2b_daily_key = f"llmcord:proactive:b2b:daily:{channel_id}:{day_key}"
     b2b_last_ts_key = f"llmcord:proactive:b2b:last_ts:{channel_id}"
     b2b_chain_key = f"llmcord:proactive:b2b:chain:{channel_id}"
-    if max_daily > 0 and int(await redis_client_instance.get(daily_key) or 0) >= max_daily:
+    current_daily_count = int(await redis_client_instance.get(daily_key) or 0)
+    if max_daily > 0 and current_daily_count >= max_daily:
+        logging.debug("[proactive:%s:%s] blocked by daily cap (%d/%d)", bot_tag, channel_id, current_daily_count, max_daily)
         return
 
     target_user_id = None
@@ -1096,7 +1304,8 @@ async def maybe_send_proactive_starter(curr_config: dict[str, Any], redis_client
     target_bot_name = None
     is_bot_to_bot = False
 
-    if proactive_bot_to_bot_enabled and random.random() <= proactive_bot_to_bot_chance:
+    b2b_roll = random.random()
+    if proactive_bot_to_bot_enabled and b2b_roll <= proactive_bot_to_bot_chance:
         b2b_daily_count = int(await redis_client_instance.get(b2b_daily_key) or 0)
         b2b_last_ts = float(await redis_client_instance.get(b2b_last_ts_key) or 0)
         b2b_chain_count = int(await redis_client_instance.get(b2b_chain_key) or 0)
@@ -1113,8 +1322,19 @@ async def maybe_send_proactive_starter(curr_config: dict[str, Any], redis_client
             proactive_bot_to_bot_idle_jitter_seconds,
             f"b2b-channel-idle:{channel_id}:{int(now // 600)}",
         )
-        passes_b2b_idle_human = b2b_human_idle_threshold <= 0 or now - last_human_ts >= b2b_human_idle_threshold
-        passes_b2b_idle_channel = b2b_channel_idle_threshold <= 0 or now - last_any_msg_ts >= b2b_channel_idle_threshold
+        passes_b2b_idle_human = b2b_human_idle_threshold <= 0 or human_idle >= b2b_human_idle_threshold
+        passes_b2b_idle_channel = b2b_channel_idle_threshold <= 0 or channel_idle >= b2b_channel_idle_threshold
+
+        logging.info(
+            "[proactive-b2b:%s:%s] gates: daily=%s(%d/%d) cooldown=%s(%.0fs/%.0fs) chain=%s(%d/%d) "
+            "human_idle=%s(%.0fs/%.0fs) chan_idle=%s(%.0fs/%.0fs)",
+            bot_tag, channel_id,
+            passes_daily_cap, b2b_daily_count, proactive_bot_to_bot_max_per_day_per_channel,
+            passes_cooldown, now - b2b_last_ts if b2b_last_ts > 0 else float("inf"), proactive_bot_to_bot_cooldown_seconds,
+            passes_chain_cap, b2b_chain_count, proactive_bot_to_bot_max_chain_without_human,
+            passes_b2b_idle_human, human_idle, b2b_human_idle_threshold,
+            passes_b2b_idle_channel, channel_idle, b2b_channel_idle_threshold,
+        )
 
         if passes_daily_cap and passes_cooldown and passes_chain_cap and passes_b2b_idle_human and passes_b2b_idle_channel:
             recent_bots_key = f"llmcord:channel:recent_bots:{channel_id}"
@@ -1157,11 +1377,20 @@ async def maybe_send_proactive_starter(curr_config: dict[str, Any], redis_client
             if chosen_candidate is not None:
                 target_bot_id, target_bot_name = chosen_candidate
                 is_bot_to_bot = True
+                logging.info("[proactive-b2b:%s:%s] chose target=%s", bot_tag, channel_id, target_bot_name)
+            else:
+                logging.info("[proactive-b2b:%s:%s] no candidates (raw=%d, filtered_weighted=%d)", bot_tag, channel_id, len(candidate_bot_ids), len(weighted_candidates))
+        else:
+            logging.debug("[proactive-b2b:%s:%s] gates blocked (see above)", bot_tag, channel_id)
+    else:
+        logging.debug("[proactive:%s:%s] b2b coin skip (roll=%.3f, need<=%.3f) or disabled=%s", bot_tag, channel_id, b2b_roll, proactive_bot_to_bot_chance, not proactive_bot_to_bot_enabled)
 
     if not is_bot_to_bot:
-        if human_idle_seconds > 0 and now - last_human_ts < human_idle_seconds:
+        if human_idle_seconds > 0 and human_idle < human_idle_seconds:
+            logging.debug("[proactive:%s:%s] human path blocked by human_idle (%.0fs < %.0fs)", bot_tag, channel_id, human_idle, human_idle_seconds)
             return
-        if channel_idle_seconds > 0 and now - last_any_msg_ts < channel_idle_seconds:
+        if channel_idle_seconds > 0 and channel_idle < channel_idle_seconds:
+            logging.debug("[proactive:%s:%s] human path blocked by channel_idle (%.0fs < %.0fs)", bot_tag, channel_id, channel_idle, channel_idle_seconds)
             return
         if random.random() > chance:
             return
@@ -1169,7 +1398,9 @@ async def maybe_send_proactive_starter(curr_config: dict[str, Any], redis_client
     claim_key = f"llmcord:proactive:claim:{channel_id}"
     claimed = await redis_client_instance.set(claim_key, get_bot_identity(), ex=claim_ttl_seconds, nx=True)
     if not claimed:
+        logging.debug("[proactive:%s:%s] claim lost to another bot", bot_tag, channel_id)
         return
+    logging.info("[proactive:%s:%s] claimed! is_b2b=%s target=%s", bot_tag, channel_id, is_bot_to_bot, target_bot_name)
 
     channel = discord_bot.get_channel(channel_id)
     if channel is None:
@@ -1235,11 +1466,13 @@ async def maybe_send_proactive_starter(curr_config: dict[str, Any], redis_client
         break
 
     if starter_text is None:
+        logging.info("[proactive:%s:%s] generation failed after %d retries", bot_tag, channel_id, retries)
         fallback_text = str(curr_config.get("proactive_fallback_starter", "") or "")
         starter_text = sanitize_proactive_message(fallback_text, proactive_max_chars, target_user_id)
         if not is_bot_to_bot and target_user_id is not None and "<@" not in starter_text:
             starter_text = f"<@{target_user_id}> {starter_text}".strip()
         if starter_text == "":
+            logging.info("[proactive:%s:%s] no fallback text, skipping", bot_tag, channel_id)
             return
 
     try:
@@ -1248,7 +1481,9 @@ async def maybe_send_proactive_starter(curr_config: dict[str, Any], redis_client
             silent=True,
             allowed_mentions=discord.AllowedMentions(users=(not is_bot_to_bot), roles=False, everyone=False),
         )
-    except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+        logging.info("[proactive:%s:%s] SENT b2b=%s text=%s", bot_tag, channel_id, is_bot_to_bot, starter_text[:80])
+    except (discord.Forbidden, discord.NotFound, discord.HTTPException) as exc:
+        logging.warning("[proactive:%s:%s] send failed: %s", bot_tag, channel_id, exc)
         return
 
     if starter_text_hash is not None:
@@ -1435,13 +1670,14 @@ async def afk_followup_scheduler_loop() -> None:
             poll_seconds = max(float(curr_config.get("afk_scheduler_poll_seconds", 5) or 5), 1)
             redis_client_instance = await get_redis_client(curr_config)
 
-            if redis_client_instance is None or not curr_config.get("afk_followup_enabled", False):
+            if redis_client_instance is None:
                 await asyncio.sleep(poll_seconds)
                 continue
 
-            due_item_ids = await redis_client_instance.zrangebyscore("llmcord:afk:schedule", min=0, max=now_ts(), start=0, num=10)
-            for item_id in due_item_ids:
-                await process_afk_followup_item(item_id, curr_config, redis_client_instance)
+            if curr_config.get("afk_followup_enabled", False):
+                due_item_ids = await redis_client_instance.zrangebyscore("llmcord:afk:schedule", min=0, max=now_ts(), start=0, num=10)
+                for item_id in due_item_ids:
+                    await process_afk_followup_item(item_id, curr_config, redis_client_instance)
 
             if curr_config.get("proactive_starters_enabled", False):
                 configured_channel_ids = set(curr_config.get("proactive_channel_ids") or [])
@@ -1450,6 +1686,10 @@ async def afk_followup_scheduler_loop() -> None:
                     candidate_channel_ids = observed_channel_ids
                 else:
                     candidate_channel_ids = configured_channel_ids
+
+                if not candidate_channel_ids:
+                    logging.info("[scheduler:%s] no candidate channels (configured=%d, observed=0)",
+                                 get_bot_identity(), len(configured_channel_ids))
 
                 for channel_id in sorted(candidate_channel_ids):
                     await maybe_send_proactive_starter(curr_config, redis_client_instance, int(channel_id))
