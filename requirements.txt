@@ -3,3 +3,5 @@ httpx
 openai
 pyyaml
 redis
+aiosqlite
+aiohttp

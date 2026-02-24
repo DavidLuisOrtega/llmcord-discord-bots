@@ -5,8 +5,10 @@ from datetime import datetime, timezone
 from hashlib import sha256
 import html as htmllib
 import io
+import json
 import logging
 import os
+from pathlib import Path
 import random
 import re
 from time import monotonic
@@ -14,6 +16,7 @@ from typing import Any, Literal, Optional
 from urllib.parse import urljoin
 from zoneinfo import ZoneInfo
 
+import aiosqlite
 import discord
 from discord.app_commands import Choice
 from discord.ext import commands
@@ -77,6 +80,49 @@ redis_client_url = None
 redis_client_lock = asyncio.Lock()
 afk_scheduler_task = None
 dm_checkin_task = None
+
+SQLITE_DB_PATH = Path(os.getenv("SQLITE_PATH", "data/llmcord.db"))
+_sqlite_db: Optional[aiosqlite.Connection] = None
+_sqlite_lock = asyncio.Lock()
+
+
+async def get_sqlite_db() -> aiosqlite.Connection:
+    global _sqlite_db
+    async with _sqlite_lock:
+        if _sqlite_db is None:
+            SQLITE_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+            _sqlite_db = await aiosqlite.connect(str(SQLITE_DB_PATH))
+            _sqlite_db.row_factory = aiosqlite.Row
+            await _sqlite_db.execute("PRAGMA journal_mode=WAL")
+            await _sqlite_db.execute("PRAGMA busy_timeout=5000")
+            await _sqlite_db.executescript("""
+                CREATE TABLE IF NOT EXISTS memories (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    bot_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    channel_id TEXT NOT NULL,
+                    fact TEXT NOT NULL,
+                    source_snippet TEXT DEFAULT '',
+                    created_at REAL NOT NULL,
+                    last_referenced_at REAL DEFAULT 0,
+                    importance INTEGER DEFAULT 1
+                );
+                CREATE INDEX IF NOT EXISTS idx_mem_bot_user ON memories(bot_id, user_id);
+
+                CREATE TABLE IF NOT EXISTS shared_moments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    channel_id TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    participants TEXT DEFAULT '',
+                    moment_type TEXT DEFAULT 'funny',
+                    created_at REAL NOT NULL,
+                    times_referenced INTEGER DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS idx_moments_channel ON shared_moments(channel_id);
+            """)
+            await _sqlite_db.commit()
+            logging.info("[sqlite] Database initialized at %s", SQLITE_DB_PATH)
+    return _sqlite_db
 
 
 def get_bot_identity() -> str:
@@ -722,6 +768,317 @@ def build_system_prompt_for_model(curr_config: dict[str, Any], accept_usernames:
     return system_prompt
 
 
+async def _incr_stat(redis_client_instance, stat_name: str) -> None:
+    if redis_client_instance is None:
+        return
+    try:
+        bot_id = get_bot_identity()
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        key = f"llmcord:stats:{stat_name}:{bot_id}:{day}"
+        await redis_client_instance.incr(key)
+        await redis_client_instance.expire(key, 172800)
+    except RedisError:
+        pass
+
+
+def _make_openai_client(curr_config: dict[str, Any]) -> tuple[AsyncOpenAI, str, dict]:
+    provider_slash_model = curr_model
+    provider, model = provider_slash_model.removesuffix(":vision").split("/", 1)
+    provider_config = curr_config["providers"][provider]
+    client = AsyncOpenAI(
+        base_url=provider_config["base_url"],
+        api_key=provider_config.get("api_key", "sk-no-key-required"),
+    )
+    model_parameters = curr_config["models"].get(provider_slash_model, None)
+    extra_body = (provider_config.get("extra_body") or {}) | (model_parameters or {}) or None
+    return client, model, {
+        "extra_headers": provider_config.get("extra_headers"),
+        "extra_query": provider_config.get("extra_query"),
+        "extra_body": extra_body,
+    }
+
+
+async def fetch_memory_block(
+    curr_config: dict[str, Any],
+    user_ids: set[int],
+    channel_id: int,
+) -> str:
+    if not curr_config.get("memory_enabled", False):
+        return ""
+    if not user_ids:
+        return ""
+    try:
+        db = await get_sqlite_db()
+        bot_id = get_bot_identity()
+        max_inject = int(curr_config.get("memory_injection_max", 8) or 8)
+        placeholders = ",".join("?" for _ in user_ids)
+        rows = await db.execute_fetchall(
+            f"SELECT user_id, fact FROM memories "
+            f"WHERE bot_id = ? AND user_id IN ({placeholders}) "
+            f"ORDER BY last_referenced_at DESC, created_at DESC "
+            f"LIMIT ?",
+            (bot_id, *[str(uid) for uid in user_ids], max_inject),
+        )
+        if not rows:
+            return ""
+        row_ids = []
+        lines = []
+        for row in rows:
+            lines.append(f"- <@{row[0]}>: {row[1]}")
+            row_ids.append(row[0])
+        now = now_ts()
+        for uid in set(str(r[0]) for r in rows):
+            await db.execute(
+                "UPDATE memories SET last_referenced_at = ? WHERE bot_id = ? AND user_id = ?",
+                (now, bot_id, uid),
+            )
+        await db.commit()
+        return "\n\nTHINGS YOU REMEMBER ABOUT PEOPLE IN THIS CHAT:\n" + "\n".join(lines)
+    except Exception:
+        logging.exception("[memory] Failed to fetch memory block")
+        return ""
+
+
+async def fetch_shared_moments_block(
+    curr_config: dict[str, Any],
+    channel_id: int,
+) -> str:
+    if not curr_config.get("shared_moments_enabled", False):
+        return ""
+    injection_chance = clamp_01(float(curr_config.get("shared_moments_injection_chance", 0.15) or 0.15))
+    if random.random() > injection_chance:
+        return ""
+    try:
+        db = await get_sqlite_db()
+        max_inject = int(curr_config.get("shared_moments_injection_max", 2) or 2)
+        rows = await db.execute_fetchall(
+            "SELECT id, summary FROM shared_moments "
+            "WHERE channel_id = ? ORDER BY RANDOM() LIMIT ?",
+            (str(channel_id), max_inject),
+        )
+        if not rows:
+            return ""
+        lines = [f"- {row[1]}" for row in rows]
+        for row in rows:
+            await db.execute(
+                "UPDATE shared_moments SET times_referenced = times_referenced + 1 WHERE id = ?",
+                (row[0],),
+            )
+        await db.commit()
+        return (
+            "\n\nSHARED GROUP MEMORIES:\n"
+            + "\n".join(lines)
+            + "\nYou can reference these naturally if they fit the conversation, but don't force it."
+        )
+    except Exception:
+        logging.exception("[moments] Failed to fetch shared moments block")
+        return ""
+
+
+VIBE_KEYWORDS: dict[str, list[str]] = {
+    "hyped": ["hype", "hyped", "lets go", "let's go", "fire", "amazing", "incredible", "awesome", "🔥", "🚀", "🎉", "💪", "W", "dub", "poggers", "pog", "lfg"],
+    "playful": ["lol", "lmao", "rofl", "haha", "hehe", "😂", "🤣", "💀", "bruh", "bro", "dude", "nah", "fr", "ong", "jokes", "joking", "kidding"],
+    "heated": ["wtf", "smh", "stfu", "trash", "garbage", "terrible", "worst", "hate", "angry", "mad", "furious", "😡", "🤬", "disagree", "wrong", "cap"],
+    "sad": ["sad", "rip", "unfortunate", "sucks", "miss", "depressing", "😢", "😭", "💔", "damn", "rough", "tough", "pain"],
+    "deep": ["meaning", "philosophy", "existential", "society", "think about", "consciousness", "purpose", "question", "wonder", "🤔", "theory", "perspective"],
+    "chill": ["chill", "vibes", "relax", "nice", "cool", "meh", "whatever", "np", "no worries", "all good", "😎", "🤙", "easy", "lowkey"],
+    "chaotic": ["chaos", "random", "cursed", "unhinged", "wild", "insane", "crazy", "💀", "😈", "🤡", "lmfao", "bruh moment", "what even"],
+}
+
+
+def detect_channel_vibe_heuristic(recent_texts: list[str]) -> Optional[str]:
+    if not recent_texts:
+        return None
+    votes: dict[str, int] = {}
+    combined = " ".join(recent_texts).lower()
+    for vibe, keywords in VIBE_KEYWORDS.items():
+        score = sum(1 for kw in keywords if kw in combined)
+        if score > 0:
+            votes[vibe] = score
+    if not votes:
+        return None
+    return max(votes, key=votes.get)
+
+
+async def fetch_vibe_block(
+    curr_config: dict[str, Any],
+    channel_id: int,
+) -> str:
+    if not curr_config.get("vibe_tracking_enabled", False):
+        return ""
+    try:
+        redis_client_instance = await get_redis_client(curr_config)
+        vibe_key = f"llmcord:channel:vibe:{channel_id}"
+        enriched_key = f"llmcord:channel:vibe_enriched:{channel_id}"
+
+        heuristic_vibe = None
+        enriched_vibe = None
+
+        if redis_client_instance is not None:
+            heuristic_vibe = await redis_client_instance.get(vibe_key)
+            enriched_vibe = await redis_client_instance.get(enriched_key)
+
+        if not heuristic_vibe and not enriched_vibe:
+            return ""
+
+        parts = []
+        if heuristic_vibe:
+            parts.append(f"The conversation feels {heuristic_vibe}")
+        if enriched_vibe:
+            parts.append(f'"{enriched_vibe}"')
+
+        vibe_text = ". ".join(parts)
+        return f"\n\nCHANNEL VIBE: {vibe_text}. Adapt your energy to match."
+    except Exception:
+        logging.exception("[vibe] Failed to fetch vibe block")
+        return ""
+
+
+def _normalize_fact(text: str) -> str:
+    return re.sub(r"\s+", " ", text.lower().strip())
+
+
+async def maybe_extract_memories(
+    curr_config: dict[str, Any],
+    user_id: int,
+    channel_id: int,
+    human_text: str,
+    bot_response_text: str,
+) -> None:
+    if not curr_config.get("memory_enabled", False):
+        return
+    min_chars = int(curr_config.get("memory_extraction_min_chars", 30) or 30)
+    if len(human_text.strip()) < min_chars:
+        return
+    if is_greeting_message(human_text):
+        return
+    if message_looks_like_short_reaction(human_text, 40):
+        return
+
+    try:
+        client, model, extras = _make_openai_client(curr_config)
+        extraction_model = str(curr_config.get("memory_extraction_model", "") or "").strip()
+        if extraction_model:
+            model = extraction_model
+
+        extraction_prompt = (
+            "You are a memory extraction assistant. Given a chat exchange, extract memorable facts about the human user. "
+            "Return a JSON object with two keys:\n"
+            '  "facts": an array of 0-3 short strings (each a single fact about the user, e.g. "lives in Chicago", "loves hiking", "works in marketing")\n'
+            '  "moment": either null or a single sentence summarizing a funny/surprising/memorable group moment if one occurred\n'
+            "If nothing notable, return {\"facts\": [], \"moment\": null}. Return ONLY valid JSON, no markdown."
+        )
+        exchange_text = f"Human: {human_text[:500]}\nBot: {bot_response_text[:500]}"
+
+        response = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": extraction_prompt},
+                {"role": "user", "content": exchange_text},
+            ],
+            **{k: v for k, v in extras.items() if v is not None},
+        )
+        raw = (response.choices[0].message.content or "").strip()
+        raw = re.sub(r"^```(?:json)?\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw)
+        parsed = json.loads(raw)
+
+        facts = parsed.get("facts") or []
+        moment = parsed.get("moment")
+
+        db = await get_sqlite_db()
+        bot_id = get_bot_identity()
+        now = now_ts()
+
+        if facts:
+            existing_rows = await db.execute_fetchall(
+                "SELECT fact FROM memories WHERE bot_id = ? AND user_id = ?",
+                (bot_id, str(user_id)),
+            )
+            existing_normalized = {_normalize_fact(r[0]) for r in existing_rows}
+
+            new_facts = []
+            for fact in facts[:3]:
+                fact_str = str(fact).strip()
+                if not fact_str:
+                    continue
+                if _normalize_fact(fact_str) in existing_normalized:
+                    continue
+                if any(_normalize_fact(fact_str) in ex for ex in existing_normalized):
+                    continue
+                new_facts.append(fact_str)
+
+            for fact_str in new_facts:
+                await db.execute(
+                    "INSERT INTO memories (bot_id, user_id, channel_id, fact, source_snippet, created_at, importance) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (bot_id, str(user_id), str(channel_id), fact_str, human_text[:200], now, 1),
+                )
+
+            max_per_user = int(curr_config.get("memory_max_per_user", 50) or 50)
+            count_row = await db.execute_fetchall(
+                "SELECT COUNT(*) FROM memories WHERE bot_id = ? AND user_id = ?",
+                (bot_id, str(user_id)),
+            )
+            current_count = count_row[0][0] if count_row else 0
+            if current_count > max_per_user:
+                excess = current_count - max_per_user
+                await db.execute(
+                    "DELETE FROM memories WHERE id IN ("
+                    "  SELECT id FROM memories WHERE bot_id = ? AND user_id = ? "
+                    "  ORDER BY importance ASC, last_referenced_at ASC, created_at ASC LIMIT ?"
+                    ")",
+                    (bot_id, str(user_id), excess),
+                )
+
+        if moment and curr_config.get("shared_moments_enabled", False):
+            moment_str = str(moment).strip()
+            if moment_str and moment_str.lower() != "null":
+                existing_moments = await db.execute_fetchall(
+                    "SELECT summary FROM shared_moments WHERE channel_id = ?",
+                    (str(channel_id),),
+                )
+                existing_moment_norms = {_normalize_fact(r[0]) for r in existing_moments}
+                if _normalize_fact(moment_str) not in existing_moment_norms:
+                    participants = f"{user_id},{bot_id}"
+                    await db.execute(
+                        "INSERT INTO shared_moments (channel_id, summary, participants, moment_type, created_at) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (str(channel_id), moment_str, participants, "funny", now),
+                    )
+                    max_moments = int(curr_config.get("shared_moments_max_per_channel", 100) or 100)
+                    count_row = await db.execute_fetchall(
+                        "SELECT COUNT(*) FROM shared_moments WHERE channel_id = ?",
+                        (str(channel_id),),
+                    )
+                    moment_count = count_row[0][0] if count_row else 0
+                    if moment_count > max_moments:
+                        excess = moment_count - max_moments
+                        await db.execute(
+                            "DELETE FROM shared_moments WHERE id IN ("
+                            "  SELECT id FROM shared_moments WHERE channel_id = ? "
+                            "  ORDER BY times_referenced ASC, created_at ASC LIMIT ?"
+                            ")",
+                            (str(channel_id), excess),
+                        )
+
+        await db.commit()
+        if new_facts if facts else False:
+            logging.info("[memory:%s] Extracted %d facts for user %s", bot_id, len(new_facts), user_id)
+            try:
+                r = await get_redis_client(curr_config)
+                await _incr_stat(r, "memories")
+            except Exception:
+                pass
+        if moment and moment_str and moment_str.lower() != "null":
+            logging.info("[memory:%s] Stored shared moment for channel %s", bot_id, channel_id)
+
+    except json.JSONDecodeError:
+        logging.debug("[memory:%s] Failed to parse extraction JSON", get_bot_identity())
+    except Exception:
+        logging.exception("[memory:%s] Memory extraction failed", get_bot_identity())
+
+
 def normalize_text_for_dedupe(value: str) -> str:
     normalized = value.lower().strip()
     normalized = re.sub(r"\s+", " ", normalized)
@@ -1031,6 +1388,7 @@ async def maybe_add_emoji_reaction(
         try:
             await trigger_msg.add_reaction(emoji)
             reacted = True
+            await _incr_stat(redis_client_instance, "reactions")
             break
         except (discord.Forbidden, discord.NotFound):
             return
@@ -1498,6 +1856,7 @@ async def maybe_send_proactive_starter(curr_config: dict[str, Any], redis_client
             allowed_mentions=discord.AllowedMentions(users=(not is_bot_to_bot), roles=False, everyone=False),
         )
         logging.info("[proactive:%s:%s] SENT b2b=%s text=%s", bot_tag, channel_id, is_bot_to_bot, starter_text[:80])
+        await _incr_stat(redis_client_instance, "b2b" if is_bot_to_bot else "proactive")
     except (discord.Forbidden, discord.NotFound, discord.HTTPException) as exc:
         logging.warning("[proactive:%s:%s] send failed: %s", bot_tag, channel_id, exc)
         return
@@ -1672,6 +2031,7 @@ async def process_afk_followup_item(item_id: str, curr_config: dict[str, Any], r
             if user is not None:
                 await user.send(followup_text)
                 sent_via_dm = True
+                await _incr_stat(redis_client_instance, "dms")
                 logging.info("[afk-dm:%s] sent DM to user %s", get_bot_identity(), source_user_id_str)
         except (discord.Forbidden, discord.NotFound, discord.HTTPException) as exc:
             logging.debug("[afk-dm:%s] DM failed for user %s: %s", get_bot_identity(), source_user_id_str, exc)
@@ -1830,6 +2190,7 @@ async def maybe_send_dm_checkin(curr_config: dict[str, Any], redis_client_instan
             if user is None:
                 continue
             await user.send(dm_text)
+            await _incr_stat(redis_client_instance, "dms")
             logging.info("[dm-checkin:%s] sent DM to %s: %s", bot_tag, target_user_id, dm_text[:60])
         except (discord.Forbidden, discord.NotFound, discord.HTTPException) as exc:
             logging.debug("[dm-checkin:%s] DM failed for user %s: %s", bot_tag, target_user_id, exc)
@@ -1870,6 +2231,46 @@ async def dm_checkin_scheduler_loop() -> None:
             await asyncio.sleep(10)
 
 
+async def maybe_enrich_channel_vibe(
+    curr_config: dict[str, Any],
+    redis_client_instance,
+    channel_id: int,
+) -> None:
+    if not curr_config.get("vibe_llm_enrichment_enabled", False):
+        return
+    interval = max(float(curr_config.get("vibe_llm_enrichment_interval_seconds", 900) or 900), 60)
+    enriched_key = f"llmcord:channel:vibe_enriched:{channel_id}"
+    lock_key = f"llmcord:vibe:enrich_lock:{channel_id}"
+
+    if await redis_client_instance.exists(enriched_key):
+        return
+    if not await redis_client_instance.set(lock_key, "1", ex=int(interval), nx=True):
+        return
+
+    vibe_texts_key = f"llmcord:channel:vibe_texts:{channel_id}"
+    recent_texts = await redis_client_instance.lrange(vibe_texts_key, 0, 14)
+    if len(recent_texts) < 3:
+        return
+
+    try:
+        client, model, extras = _make_openai_client(curr_config)
+        conversation = "\n".join(f"- {t}" for t in recent_texts[:15])
+        response = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "Describe the current vibe of this Discord conversation in 5-10 words. Just the vibe description, nothing else."},
+                {"role": "user", "content": conversation},
+            ],
+            **{k: v for k, v in extras.items() if v is not None},
+        )
+        enriched = (response.choices[0].message.content or "").strip()[:100]
+        if enriched:
+            await redis_client_instance.set(enriched_key, enriched, ex=int(interval))
+            logging.info("[vibe:%s] Enriched vibe for channel %s: %s", get_bot_identity(), channel_id, enriched)
+    except Exception:
+        logging.debug("[vibe:%s] LLM enrichment failed for channel %s", get_bot_identity(), channel_id)
+
+
 async def afk_followup_scheduler_loop() -> None:
     while True:
         try:
@@ -1900,6 +2301,11 @@ async def afk_followup_scheduler_loop() -> None:
 
                 for channel_id in sorted(candidate_channel_ids):
                     await maybe_send_proactive_starter(curr_config, redis_client_instance, int(channel_id))
+
+            if curr_config.get("vibe_tracking_enabled", False) and curr_config.get("vibe_llm_enrichment_enabled", False):
+                observed_channel_ids = {int(x) for x in await redis_client_instance.smembers("llmcord:observed_channels")}
+                for channel_id in observed_channel_ids:
+                    await maybe_enrich_channel_vibe(curr_config, redis_client_instance, channel_id)
 
             await asyncio.sleep(poll_seconds + random.uniform(0, 0.5))
         except asyncio.CancelledError:
@@ -1971,6 +2377,8 @@ async def on_ready() -> None:
         logging.info(f"\n\nBOT INVITE URL:\nhttps://discord.com/oauth2/authorize?client_id={client_id}&permissions=412317191168&scope=bot\n")
 
     await discord_bot.tree.sync()
+
+    await get_sqlite_db()
 
     if afk_scheduler_task is None or afk_scheduler_task.done():
         afk_scheduler_task = asyncio.create_task(afk_followup_scheduler_loop())
@@ -2124,6 +2532,20 @@ async def on_message(new_msg: discord.Message) -> None:
             now = now_ts()
             await redis_client_instance.sadd("llmcord:observed_channels", str(channel_id))
             await redis_client_instance.set(f"llmcord:channel:last_message_ts:{channel_id}", now, ex=7 * 24 * 3600)
+
+            if config.get("vibe_tracking_enabled", False):
+                vibe_texts_key = f"llmcord:channel:vibe_texts:{channel_id}"
+                msg_text = (new_msg.content or "").strip()[:300]
+                if msg_text:
+                    await redis_client_instance.lpush(vibe_texts_key, msg_text)
+                    await redis_client_instance.ltrim(vibe_texts_key, 0, int(config.get("vibe_heuristic_message_count", 15) or 15) - 1)
+                    await redis_client_instance.expire(vibe_texts_key, 3600)
+                    recent_texts = await redis_client_instance.lrange(vibe_texts_key, 0, -1)
+                    vibe_label = detect_channel_vibe_heuristic(recent_texts)
+                    if vibe_label:
+                        await redis_client_instance.set(
+                            f"llmcord:channel:vibe:{channel_id}", vibe_label, ex=300,
+                        )
 
             consecutive_bot_turns_key = f"llmcord:channel:consecutive_bot_turns:{channel_id}"
             proactive_b2b_chain_key = f"llmcord:proactive:b2b:chain:{channel_id}"
@@ -2427,6 +2849,21 @@ async def on_message(new_msg: discord.Message) -> None:
     logging.info(f"Message received (user ID: {new_msg.author.id}, attachments: {len(new_msg.attachments)}, conversation length: {len(messages)}):\n{new_msg.content}")
 
     if system_prompt := build_system_prompt_for_model(config, accept_usernames):
+        conversation_user_ids = {m.get("name") for m in messages if m.get("role") == "user" and m.get("name")}
+        conversation_user_ids_int = set()
+        for uid_str in conversation_user_ids:
+            try:
+                conversation_user_ids_int.add(int(uid_str))
+            except (ValueError, TypeError):
+                pass
+        if not new_msg.author.bot:
+            conversation_user_ids_int.add(new_msg.author.id)
+
+        memory_block = await fetch_memory_block(config, conversation_user_ids_int, new_msg.channel.id)
+        moments_block = await fetch_shared_moments_block(config, new_msg.channel.id)
+        vibe_block = await fetch_vibe_block(config, new_msg.channel.id)
+        system_prompt += memory_block + moments_block + vibe_block
+
         messages.append(dict(role="system", content=system_prompt))
 
     # Generate and send response message(s) (can be multiple if response is long)
@@ -2445,6 +2882,7 @@ async def on_message(new_msg: discord.Message) -> None:
     async def reply_helper(**reply_kwargs) -> None:
         response_msg = await new_msg.channel.send(**reply_kwargs)
         response_msgs.append(response_msg)
+        await _incr_stat(redis_client_instance, "messages")
 
         msg_nodes[response_msg.id] = MsgNode(parent_msg=new_msg)
         await msg_nodes[response_msg.id].lock.acquire()
@@ -2540,6 +2978,7 @@ async def on_message(new_msg: discord.Message) -> None:
             if dm_user is not None:
                 dm_text = final_text[:1900] if len(final_text) > 1900 else final_text
                 await dm_user.send(dm_text)
+                await _incr_stat(redis_client_instance, "dms")
                 logging.info("[dm-request:%s] sent DM to %s", get_bot_identity(), new_msg.author.id)
         except (discord.Forbidden, discord.NotFound, discord.HTTPException) as exc:
             logging.debug("[dm-request:%s] DM failed: %s", get_bot_identity(), exc)
@@ -2573,6 +3012,11 @@ async def on_message(new_msg: discord.Message) -> None:
                     now_ts(),
                     ex=max(int(pair_back_and_forth_cooldown_seconds * 4), 300),
                 )
+
+    if response_msgs and not is_dm and not new_msg.author.bot and final_text:
+        asyncio.create_task(
+            maybe_extract_memories(config, new_msg.author.id, new_msg.channel.id, new_msg.content, final_text)
+        )
 
     for response_msg in response_msgs:
         msg_nodes[response_msg.id].text = final_text

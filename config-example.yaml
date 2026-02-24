@@ -167,6 +167,25 @@ persona_preferred_fillers: []
 persona_misspell_chance: 0.0  # Kevin profile only. Chance to add a light typo.
 persona_playful_jab_chance: 0.0  # Damon profile only. Chance to append playful jab.
 
+# Persistent memory (bots remember facts about users across sessions):
+memory_enabled: false
+memory_extraction_min_chars: 30  # Min human message length to trigger extraction
+memory_max_per_user: 50  # Max stored facts per bot-user pair
+memory_injection_max: 8  # Max memories injected into system prompt
+memory_extraction_model: ""  # Override model for extraction (empty = use bot's model)
+
+# Shared moments / inside jokes:
+shared_moments_enabled: false
+shared_moments_max_per_channel: 100
+shared_moments_injection_chance: 0.15  # Probability of injecting moments into prompt
+shared_moments_injection_max: 2  # Max moments injected per prompt
+
+# Channel vibe / sentiment tracking:
+vibe_tracking_enabled: false
+vibe_heuristic_message_count: 15  # Number of recent messages to analyze
+vibe_llm_enrichment_enabled: false  # Periodic LLM-based vibe description
+vibe_llm_enrichment_interval_seconds: 900  # How often to refresh LLM enrichment
+
 use_plain_responses: false
 allow_dms: true
 
